@@ -18,6 +18,7 @@ from scraper import Scraper
 
 app = FastAPI()
 executor = ThreadPoolExecutor(max_workers=4)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 
 def get_os_info():
     os_info = platform.system()
@@ -63,7 +64,7 @@ async def log_requests(request, call_next):
     return response
 
 
-def list_task(keyword: str, limit: int = 100):
+def list_task(keyword: str, limit: int = 3):
     result = {
         'keyword' : keyword,
         'result'  : []
@@ -80,7 +81,7 @@ def list_task(keyword: str, limit: int = 100):
     finally:
         return result
 @app.get("/search/list")
-async def search_list(keywords: str, limit: int = 3):
+async def search_list(keywords: str, limit: int = 20):
     logger = logging.getLogger('uvicorn')
     result = {
         'keyword' : keywords,
@@ -126,7 +127,7 @@ async def search_video(videoid: str):
     finally:
         return result
 
-def shorts_task(videoid: str):
+def shorts_task_(videoid: str):
     logger = logging.getLogger('uvicorn')
     shorts_url = f"https://www.youtube.com/shorts/{videoid}"
     try:
@@ -140,22 +141,38 @@ def shorts_task(videoid: str):
     finally:
         scraper.driver.quit()
         return result
-@app.get("/search/shorts")
-async def search_shorts(videoid: str):
-    logger = logging.getLogger('uvicorn')
+
+def shorts_task(keyword: str, limit: int = 3):
     result = {
-        'videoid': videoid,
-        'result': '검색 결과가 없습니다.'
+        'keyword' : keyword,
+        'result'  : []
     }
     try:
+        scraper = Scraper()
+        result = scraper.scrape_youtube(keyword, limit)
+        result = {
+            'keyword': keyword,
+            'result': result
+        }
+    except Exception as e:
+        traceback.print_exc()
+    finally:
+        return result
+
+@app.get("/search/shorts")
+async def search_shorts(keywords: str):
+    logger = logging.getLogger('uvicorn')
+    try:
+        logger.info("???")
         loop = asyncio.get_event_loop()
-        result = await loop.run_in_executor(executor, shorts_task, videoid)
+        result = await loop.run_in_executor(executor, shorts_task, keywords)
     except Exception as e:
         logger.error(f"Error: {e} videoid : {videoid} at traceback: {traceback.print_exc()}")
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         return result
+
 
 
 def chrome_manage(os:str):
