@@ -1,0 +1,31 @@
+{
+  "commentThreadRenderer": {
+    "trackingParams": "CE4QwnUYZyITCN3essLXm4YDFUAuewcdBvoNSA==",
+    "renderingPriority": "RENDERING_PRIORITY_UNKNOWN",
+    "isModeratedElqComment": false,
+    "commentViewModel": {
+      "commentViewModel": {
+        "commentKey": "EhpVZ3hGbnZpZmN0S0F1enhxOWJwNEFhQUJBZyAoKAE%3D",
+        "sharedKey": "EgAgKygB",
+        "toolbarStateKey": "EhpVZ3hGbnZpZmN0S0F1enhxOWJwNEFhQUJBZyAsKAE%3D",
+        "toolbarSurfaceKey": "Eh1VZ3hGbnZpZmN0S0F1enhxOWJwNEFhQUJBZy8xMiBGKAE%3D",
+        "commentId": "UgxFnvifctKAuzxq9bp4AaABAg",
+        "commentSurfaceKey": "Eh1VZ3hGbnZpZmN0S0F1enhxOWJwNEFhQUJBZy8xMiBPKAE%3D",
+        "rendererContext": {
+          "loggingContext": {
+            "loggingDirectives": {
+              "trackingParams": "CE8QtnUiEwjd3rLC15uGAxVALnsHHQb6DUg=",
+              "visibility": { "types": "12" },
+              "enableDisplayloggerExperiment": true
+            }
+          }
+        }
+      }
+    },
+    "loggingDirectives": {
+      "trackingParams": "CE4QwnUYZyITCN3essLXm4YDFUAuewcdBvoNSA==",
+      "visibility": { "types": "12" },
+      "enableDisplayloggerExperiment": true
+    }
+  }
+}
