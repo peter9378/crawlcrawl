@@ -11,9 +11,12 @@ import logging
 import re
 import time
 
+#logging.basicConfig(level=logging.DEBUG, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+#logger = logging.getLogger(__name__)
+
 class Scraper:
     def __init__(self):
-        self.selenium_driver = SeleniumDriver(start_url='https://www.youtube.com/')
+        self.selenium_driver = SeleniumDriver(start_url='https://www.naver.com/')
         if not self.selenium_driver.health_check():
             print("Driver setup failed.")
             self.selenium_driver = None
@@ -21,16 +24,21 @@ class Scraper:
         self.scroll_position = 0
         self.logger = logging.getLogger('uvicorn')
 
-    def get_list(self, query: str, limit: int = 30):
+    def crawl_naverprice(self, query: str, limit: int = 30):
         driver = self.driver
-        base_url = 'https://www.youtube.com/results?search_query='
+        base_url = 'https://search.shopping.naver.com/search/all?query='
         driver.get(f'{base_url}{query}')
+        print(driver.page_source)
         results = []
         while len(results) < limit:
             try:
                 self.scroll_down(driver, 2)
-                WebDriverWait(driver, 3).until(EC.presence_of_all_elements_located((By.ID, 'thumbnail')))
+                print("get elements...")
+                element = WebDriverWait(driver, 10).until(
+                    EC.presence_of_element_located((By.XPATH, "//div[contains(@class, 'item')]"))
+                )
                 soup = BeautifulSoup(driver.page_source, 'html.parser')
+                print(f"soup: {soup}")
                 postfixs = soup.select('#dismissible #thumbnail')
                 
                 for postfix in postfixs:

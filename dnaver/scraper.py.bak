@@ -28,41 +28,35 @@ class Scraper:
         results = []
         while len(results) < limit:
             try:
-                self.scroll_down(driver, 2)
+                self.scroll_down(driver, 5)
                 WebDriverWait(driver, 3).until(EC.presence_of_all_elements_located((By.ID, 'thumbnail')))
                 soup = BeautifulSoup(driver.page_source, 'html.parser')
                 postfixs = soup.select('#dismissible #thumbnail')
                 
                 for postfix in postfixs:
-                    href = postfix.get('href')
-                    if not href:
-                        continue
-                    url = f"https://www.youtube.com{href}"
+                    url = f"https://www.youtube.com{postfix['href']}"
                     print(url)
 
                     video_id = url.split('/')[-1] if 'shorts' in url else url.split('v=')[1]
                     if 'watch' in url:
+                        pass
+                        title = item.find(id='video-title').text.strip()
+
                         # 생성 날짜 가져오는 부분
                         # TODO: 캐시해서 성능 향상시키기
-                        (title, view_count, published_date) = self.get_video_detail(url)
+                        (view_count_number, publish_date) = self.get_video_detail(url)
                         result = {
                             "VideoID": video_id,
                             "title": title,
                             "url": url,
-                            "videoCount": view_count,
-                            "publishedDate": published_date,
-                            "videoType": "video"
+                            "videoCount": view_count_number,
+                            "publishedDate": publish_date
                         }
                     elif 'shorts' in url:
-                        (title, view_count, published_date) = self.get_shorts_detail(url)
-                        result = {
-                            "VideoID": video_id,
-                            "title": title,
-                            "url": url,
-                            "videoCount": view_count,
-                            "publishedDate": published_date,
-                            "videoType": "shorts"
-                        }
+                        print("shorts!")
+                        title = item.find(id='video-title').text.strip()
+                        print(f"title: {title}")
+                        (view_count_number, publish_date) = self.get_shorts_detail(url)
 
                     results.append(result)
             except TimeoutException:
@@ -82,6 +76,7 @@ class Scraper:
                 WebDriverWait(driver, 3).until(EC.presence_of_all_elements_located((By.ID, 'thumbnail')))
                 soup = BeautifulSoup(driver.page_source, 'html.parser')
                 dismissible_items = soup.find_all(id='dismissible')
+                print(dismissible_items)
                 urls.update([thumbnail.get_attribute('href') for thumbnail in thumbnails if thumbnail.get_attribute('href')])
             except TimeoutException:
                 self.logger.error('TimeoutException during scrolling or element loading.')
@@ -107,24 +102,21 @@ class Scraper:
     def get_video_detail(self, url: str):
         driver = self.driver
         driver.get(url)
-        WebDriverWait(driver, 3).until(EC.presence_of_element_located((By.ID, 'microformat')))
+        WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.ID, 'microformat')))
         soup = BeautifulSoup(driver.page_source, 'html.parser')
         video_id = url.split('v=')[1]
         
         try:
-            title_element = soup.find('yt-formatted-string', class_='style-scope ytd-video-description-header-renderer')
-            title = title_element.text.strip() if title_element else None
-
             view_count_text = soup.find('span', class_='view-count style-scope ytd-video-view-count-renderer').text
             view_count_number = re.sub(r'[^0-9]', '', view_count_text)
 
-            published_date_text = soup.find(id='info-strings').text.strip()
-            published_date_match = re.search(r'(\d{4})\.\s*(\d{1,2})\.\s*(\d{1,2})\.', published_date_text)
-            if published_date_match:
-                year, month, day = published_date_match.groups()
-                published_date = f"{year}-{month.zfill(2)}-{day.zfill(2)}"
+            publish_date_text = soup.find(id='info-strings').text.strip()
+            publish_date_match = re.search(r'(\d{4})\.\s*(\d{1,2})\.\s*(\d{1,2})\.', publish_date_text)
+            if publish_date_match:
+                year, month, day = publish_date_match.groups()
+                publish_date = f"{year}-{month.zfill(2)}-{day.zfill(2)}"
 
-            return (title, view_count_number, published_date)
+            return (view_count_number, publish_date)
         except Exception as e:
             print(f"Error extracting video details: {e} at traceback: {traceback.format_exc()}")
             result = {
@@ -138,33 +130,18 @@ class Scraper:
     def get_shorts_detail(self, url: str):
         driver = self.driver
         driver.get(url)
-        WebDriverWait(driver, 3).until(EC.presence_of_element_located((By.ID, 'menu-button')))
+        WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.ID, 'menu-button')))
         soup = BeautifulSoup(driver.page_source, 'html.parser')
         video_id = url.split('shorts/')[1]
         
         try:
-            title_element = soup.find('yt-formatted-string', class_='style-scope ytd-video-description-header-renderer')
-            title = title_element.text.strip() if title_element else None
-
-            factoids = soup.find_all('factoid-renderer', class_='YtwFactoidRendererHost')
-
-            view_count = None
-            published_date = None
-
-            for factoid in factoids:
-                div = factoid.find('div', class_='YtwFactoidRendererFactoid')
-                aria_label = div.get('aria-label', '')
-                if '조회수' in aria_label:
-                    # 조회수 추출
-                    view_count = aria_label.replace('조회수', '').replace('회', '').replace(',', '').strip()
-                elif '좋아요' in aria_label:
-                    # 좋아요 수 추출 (필요하다면)
-                    likes = aria_label.replace('좋아요', '').replace('개', '').strip()
-                else:
-                    # 날짜 추출
-                    published_date = aria_label.strip()
-            return (title, view_count, published_date)
-
+            view_count = soup.find_all('div').find(class_='factoid').text.strip()
+            print(view_count)
+            result = {
+                "VideoID": video_id,
+                "viewCount": view_count,
+                "publishDate": ""
+            }
         except Exception as e:
             self.logger.error(f"Error extracting shorts details: {e} at traceback: {traceback.format_exc()}")
             result = {
