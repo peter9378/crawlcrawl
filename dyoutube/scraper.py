@@ -120,6 +120,7 @@ class Scraper:
 
             published_date_text = soup.find(id='info-strings').text.strip()
             published_date_match = re.search(r'(\d{4})\.\s*(\d{1,2})\.\s*(\d{1,2})\.', published_date_text)
+            published_date = None
             if published_date_match:
                 year, month, day = published_date_match.groups()
                 published_date = f"{year}-{month.zfill(2)}-{day.zfill(2)}"

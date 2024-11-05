@@ -1,8 +1,10 @@
 from selenium import webdriver
 from selenium.webdriver import ChromeOptions
 from selenium.common.exceptions import WebDriverException
+from selenium.webdriver.chrome.service import Service
 from webdriver_manager.chrome import ChromeDriverManager
 import time
+import os
 
 class SeleniumDriver:
     def __init__(self, start_url='https://www.youtube.com/'):
@@ -27,7 +29,7 @@ class SeleniumDriver:
 
     def set_up(self):
         try:
-            self.driver = webdriver.Chrome(service=webdriver.chrome.service.Service(ChromeDriverManager().install()), options=self.options)
+            self.driver = webdriver.Chrome(options=self.options)
             self.driver.get(self.start_url)
         except WebDriverException as e:
             print(f"Error setting up the driver: {e}")
