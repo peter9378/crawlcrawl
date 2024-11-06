@@ -63,6 +63,9 @@ async def log_requests(request, call_next):
     
     return response
 
+@app.get("/test")
+async def test():
+    return { "result": "test success" }
 
 def list_task(keyword: str, limit: int = 3):
     result = {
@@ -80,9 +83,11 @@ def list_task(keyword: str, limit: int = 3):
         traceback.print_exc()
     finally:
         return result
+
 @app.get("/search/list")
 async def search_list(keywords: str, limit: int = 20):
     logger = logging.getLogger('uvicorn')
+    print(f"keywords: {keywords}, limit: {limit}")
     result = {
         'keyword' : keywords,
         'result'  : []

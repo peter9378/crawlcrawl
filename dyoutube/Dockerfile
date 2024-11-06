@@ -28,11 +28,15 @@ RUN apt-get update && apt-get install -yqq \
     libcurl3-nss \
     libcurl4
 
+RUN apt-get install -yqq \
+    vim \
+    curl
+
 RUN wget https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb && \
     dpkg -i google-chrome-stable_current_amd64.deb && \
     rm google-chrome-stable_current_amd64.deb
 
-MKDIR app
+RUN mkdir app
 WORKDIR app
 
 COPY . .
