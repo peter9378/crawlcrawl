@@ -10,6 +10,7 @@ import json
 import logging
 import re
 import time
+from datetime import datetime, timedelta
 
 class Scraper:
     def __init__(self):
@@ -28,11 +29,12 @@ class Scraper:
         results = []
         while len(results) < limit:
             try:
-                self.scroll_down(driver, 2)
+                self.scroll_down(driver, int(limit/10)+1)
                 WebDriverWait(driver, 3).until(EC.presence_of_all_elements_located((By.ID, 'thumbnail')))
                 soup = BeautifulSoup(driver.page_source, 'html.parser')
                 postfixs = soup.select('#dismissible #thumbnail')
-                
+
+                print("loop start")
                 for postfix in postfixs:
                     href = postfix.get('href')
                     if not href:
@@ -63,6 +65,9 @@ class Scraper:
                             "publishedDate": published_date,
                             "videoType": "shorts"
                         }
+                    else:
+                        result = {
+                                }
 
                     results.append(result)
             except TimeoutException:
@@ -85,7 +90,7 @@ class Scraper:
                 urls.update([thumbnail.get_attribute('href') for thumbnail in thumbnails if thumbnail.get_attribute('href')])
             except TimeoutException:
                 self.logger.error('TimeoutException during scrolling or element loading.')
-        
+
         results = []
         for url in list(urls)[:limit]:
             try:
@@ -110,7 +115,7 @@ class Scraper:
         WebDriverWait(driver, 3).until(EC.presence_of_element_located((By.ID, 'microformat')))
         soup = BeautifulSoup(driver.page_source, 'html.parser')
         video_id = url.split('v=')[1]
-        
+
         try:
             title_element = soup.find('yt-formatted-string', class_='style-scope ytd-video-description-header-renderer')
             title = title_element.text.strip() if title_element else None
@@ -119,11 +124,7 @@ class Scraper:
             view_count_number = re.sub(r'[^0-9]', '', view_count_text)
 
             published_date_text = soup.find(id='info-strings').text.strip()
-            published_date_match = re.search(r'(\d{4})\.\s*(\d{1,2})\.\s*(\d{1,2})\.', published_date_text)
-            published_date = None
-            if published_date_match:
-                year, month, day = published_date_match.groups()
-                published_date = f"{year}-{month.zfill(2)}-{day.zfill(2)}"
+            published_date = self.convert_date(published_date_text)
 
             return (title, view_count_number, published_date)
         except Exception as e:
@@ -142,7 +143,7 @@ class Scraper:
         WebDriverWait(driver, 3).until(EC.presence_of_element_located((By.ID, 'menu-button')))
         soup = BeautifulSoup(driver.page_source, 'html.parser')
         video_id = url.split('shorts/')[1]
-        
+
         try:
             title_element = soup.find('yt-formatted-string', class_='style-scope ytd-video-description-header-renderer')
             title = title_element.text.strip() if title_element else None
@@ -153,17 +154,19 @@ class Scraper:
             published_date = None
 
             for factoid in factoids:
+                print(f"factoid: {factoid}")
                 div = factoid.find('div', class_='YtwFactoidRendererFactoid')
                 aria_label = div.get('aria-label', '')
-                if '조회수' in aria_label:
+                print(aria_label)
+                if 'views' in aria_label:
                     # 조회수 추출
-                    view_count = aria_label.replace('조회수', '').replace('회', '').replace(',', '').strip()
-                elif '좋아요' in aria_label:
+                    view_count = aria_label.replace(' views', '').replace(',', '').strip()
+                elif 'likes' in aria_label:
                     # 좋아요 수 추출 (필요하다면)
-                    likes = aria_label.replace('좋아요', '').replace('개', '').strip()
+                    likes = aria_label.replace('likes', '').strip()
                 else:
                     # 날짜 추출
-                    published_date = aria_label.strip()
+                    published_date = self.convert_date(aria_label)
             return (title, view_count, published_date)
 
         except Exception as e:
@@ -177,13 +180,40 @@ class Scraper:
         return result
 
     def scroll_down(self, driver, nloop: int = 1):
+        print(f"loop: {nloop}")
         for _ in range(nloop):
             self.scroll_position += 700
             driver.execute_script(f"window.scrollTo(0, {self.scroll_position})")
             time.sleep(0.5)  # Optional: Add a small delay to allow content to load
+
+    def convert_date(self, input_str: str):
+        print(f"input date: {input_str}")
+        try:
+            # 패턴 정의: "Apr 29, 2024", "Streamed live on Nov 8, 2024", "Premiered Jan 18, 2022", 또는 "Streamed live 6 hours ago"
+            date_pattern = r'(?:Streamed live on |Premiered )?(\w{3}) (\d{1,2}), (\d{4})'
+            hours_ago_pattern = r'Streamed live (\d+) hours ago'
+
+            # 날짜 형식 매칭
+            match = re.search(date_pattern, input_str)
+            if match:
+                month_str, day, year = match.groups()
+                date_obj = datetime.strptime(f'{month_str} {day} {year}', '%b %d %Y')
+                return date_obj.strftime('%Y-%m-%d')
+
+            # 몇 시간 전 형식 매칭
+            match = re.search(hours_ago_pattern, input_str)
+            if match:
+                hours_ago = int(match.group(1))
+                date_obj = datetime.now() - timedelta(hours=hours_ago)
+                return date_obj.strftime('%Y-%m-%d')
+
+            return "9999-09-09"
+        except ValueError as e:
+            return f"Error: {e}"
 
 if __name__ == "__main__":
     scraper = Scraper()
     result = scraper.scrape_youtube('검은콩', limit=3)
     with open('result.json', 'w', encoding='utf-8') as f:
         json.dump(result, f, ensure_ascii=False, indent=4)
+

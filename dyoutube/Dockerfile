@@ -1,7 +1,5 @@
 FROM python:3.8-slim
 
-RUN chmod 777 .
-
 RUN apt-get update && apt-get install -yqq \
     wget \
     fonts-liberation \
@@ -26,22 +24,19 @@ RUN apt-get update && apt-get install -yqq \
     xdg-utils \
     libcurl3-gnutls \
     libcurl3-nss \
-    libcurl4
-
-RUN apt-get install -yqq \
-    vim \
-    curl
-
-RUN wget https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb && \
+    libcurl4 && \
+    wget https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb && \
     dpkg -i google-chrome-stable_current_amd64.deb && \
-    rm google-chrome-stable_current_amd64.deb
+    rm google-chrome-stable_current_amd64.deb && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
 
-RUN mkdir app
-WORKDIR app
+WORKDIR /app
 
 COPY . .
 
 RUN pip install --upgrade pip && \
-    pip install -r requirements.txt
+    pip install --no-cache-dir -r requirements.txt
 
 CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "80"]
+
+
