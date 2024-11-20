@@ -84,7 +84,6 @@ class Scraper:
             view_count_number = re.sub(r'[^0-9]', '', view_count_text)
 
             published_date_text = soup.find(id='info-strings').text.strip()
-            print(published_date_text)
             published_date = self.convert_date(published_date_text)
 
             return (title, view_count_number, published_date)
