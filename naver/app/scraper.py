@@ -13,8 +13,11 @@ import json
 class Scraper:
   def __init__(self):
     # Initialize any necessary variables or objects here
-    self.driver = SeleniumDriver().set_up()
-    self.retry = 0
+    self.selenium_driver = SeleniumDriver(start_url='https://search.naver.com')
+    if not self.selenium_driver.health_check():
+        print("Driver setup failed.")
+        self.selenium_driver = None
+    self.driver = self.selenium_driver.driver
     pass
 
   def scrape_naver(self, keyword:str, delay:float=0.25):

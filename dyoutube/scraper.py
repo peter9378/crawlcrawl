@@ -1,10 +1,9 @@
-from selenium.webdriver import Chrome
+from selenium.webdriver import Chrome, ChromeOptions
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import NoSuchElementException, WebDriverException, TimeoutException
+from selenium.common.exceptions import TimeoutException
 from selenium.webdriver.common.by import By
 from selenium_driver import SeleniumDriver
-import traceback
 from bs4 import BeautifulSoup
 import json
 import logging
@@ -29,23 +28,18 @@ class Scraper:
         results = []
         while len(results) < limit:
             try:
-                self.scroll_down(driver, int(limit/10)+1)
+                self.scroll_down(driver, int(limit/10) + 1)
                 WebDriverWait(driver, 3).until(EC.presence_of_all_elements_located((By.ID, 'thumbnail')))
                 soup = BeautifulSoup(driver.page_source, 'html.parser')
                 postfixs = soup.select('#dismissible #thumbnail')
 
-                print("loop start")
                 for postfix in postfixs:
                     href = postfix.get('href')
                     if not href:
                         continue
                     url = f"https://www.youtube.com{href}"
-                    print(url)
-
                     video_id = url.split('/')[-1] if 'shorts' in url else url.split('v=')[1]
                     if 'watch' in url:
-                        # 생성 날짜 가져오는 부분
-                        # TODO: 캐시해서 성능 향상시키기
                         (title, view_count, published_date) = self.get_video_detail(url)
                         result = {
                             "VideoID": video_id,
@@ -66,47 +60,13 @@ class Scraper:
                             "videoType": "shorts"
                         }
                     else:
-                        result = {
-                                }
+                        continue
 
                     results.append(result)
             except TimeoutException:
                 self.logger.error('TimeoutException during scrolling or element loading.')
-        return results
-
-    def scrape_youtube(self, query: str, limit: int = 3):
-        driver = self.driver
-        base_url = 'https://www.youtube.com/results?search_query='
-        driver.get(f'{base_url}{query}')
-        results = []
-        urls = set()
-
-        while len(urls) < limit * 1.3:
-            try:
-                self.scroll_down(driver, 3)
-                WebDriverWait(driver, 3).until(EC.presence_of_all_elements_located((By.ID, 'thumbnail')))
-                soup = BeautifulSoup(driver.page_source, 'html.parser')
-                dismissible_items = soup.find_all(id='dismissible')
-                urls.update([thumbnail.get_attribute('href') for thumbnail in thumbnails if thumbnail.get_attribute('href')])
-            except TimeoutException:
-                self.logger.error('TimeoutException during scrolling or element loading.')
-
-        results = []
-        for url in list(urls)[:limit]:
-            try:
-                if 'shorts' in url:
-                    result = self.get_shorts_detail(url)
-                elif 'watcaasdfasdasdsh' in url:
-                    result = self.get_video_detail(url)
-                else:
-                    continue
-                results.append(result)
-            except TimeoutException:
-                self.logger.error(f"TimeoutException for URL: {url}")
-                continue
-            except Exception as e:
-                self.logger.error(f"Error: {e} at traceback: {traceback.format_exc()}")
-                continue
+        driver.quit()  # Ensure driver quits to prevent zombie processes
+        print(f"result cnt: {len(results)}")
         return results
 
     def get_video_detail(self, url: str):
@@ -124,18 +84,13 @@ class Scraper:
             view_count_number = re.sub(r'[^0-9]', '', view_count_text)
 
             published_date_text = soup.find(id='info-strings').text.strip()
+            print(published_date_text)
             published_date = self.convert_date(published_date_text)
 
             return (title, view_count_number, published_date)
         except Exception as e:
-            print(f"Error extracting video details: {e} at traceback: {traceback.format_exc()}")
-            result = {
-                "VideoID": video_id,
-                "viewCount": "",
-                "publishDate": "",
-                "Error": "ExtractionError"
-            }
-        return result
+            self.logger.error(f"Error extracting video details: {e}")
+            return (None, None, None)
 
     def get_shorts_detail(self, url: str):
         driver = self.driver
@@ -154,57 +109,60 @@ class Scraper:
             published_date = None
 
             for factoid in factoids:
-                print(f"factoid: {factoid}")
                 div = factoid.find('div', class_='YtwFactoidRendererFactoid')
                 aria_label = div.get('aria-label', '')
-                print(aria_label)
                 if 'views' in aria_label:
-                    # 조회수 추출
                     view_count = aria_label.replace(' views', '').replace(',', '').strip()
-                elif 'likes' in aria_label:
-                    # 좋아요 수 추출 (필요하다면)
-                    likes = aria_label.replace('likes', '').strip()
                 else:
-                    # 날짜 추출
                     published_date = self.convert_date(aria_label)
             return (title, view_count, published_date)
 
         except Exception as e:
-            self.logger.error(f"Error extracting shorts details: {e} at traceback: {traceback.format_exc()}")
-            result = {
-                "VideoID": video_id,
-                "viewCount": "",
-                "publishDate": "",
-                "Error": "ExtractionError"
-            }
-        return result
+            self.logger.error(f"Error extracting shorts details: {e}")
+            return (None, None, None)
 
     def scroll_down(self, driver, nloop: int = 1):
-        print(f"loop: {nloop}")
         for _ in range(nloop):
             self.scroll_position += 700
             driver.execute_script(f"window.scrollTo(0, {self.scroll_position})")
-            time.sleep(0.5)  # Optional: Add a small delay to allow content to load
+            time.sleep(0.5)
 
     def convert_date(self, input_str: str):
-        print(f"input date: {input_str}")
         try:
-            # 패턴 정의: "Apr 29, 2024", "Streamed live on Nov 8, 2024", "Premiered Jan 18, 2022", 또는 "Streamed live 6 hours ago"
             date_pattern = r'(?:Streamed live on |Premiered )?(\w{3}) (\d{1,2}), (\d{4})'
             hours_ago_pattern = r'Streamed live (\d+) hours ago'
+            korean_date_pattern = r'(\d{4})\. (\d{1,2})\. (\d{1,2})\.'
+            premiered_korean_pattern = r'최초 공개: (\d{4})\. (\d{1,2})\. (\d{1,2})\.'
+            minutes_ago_pattern = r'(\d+)분 전 최초 공개'
 
-            # 날짜 형식 매칭
             match = re.search(date_pattern, input_str)
             if match:
                 month_str, day, year = match.groups()
                 date_obj = datetime.strptime(f'{month_str} {day} {year}', '%b %d %Y')
                 return date_obj.strftime('%Y-%m-%d')
 
-            # 몇 시간 전 형식 매칭
             match = re.search(hours_ago_pattern, input_str)
             if match:
                 hours_ago = int(match.group(1))
                 date_obj = datetime.now() - timedelta(hours=hours_ago)
+                return date_obj.strftime('%Y-%m-%d')
+
+            match = re.search(korean_date_pattern, input_str)
+            if match:
+                year, month, day = match.groups()
+                date_obj = datetime.strptime(f'{year}-{month}-{day}', '%Y-%m-%d')
+                return date_obj.strftime('%Y-%m-%d')
+
+            match = re.search(premiered_korean_pattern, input_str)
+            if match:
+                year, month, day = match.groups()
+                date_obj = datetime.strptime(f'{year}-{month}-{day}', '%Y-%m-%d')
+                return date_obj.strftime('%Y-%m-%d')
+
+            match = re.search(minutes_ago_pattern, input_str)
+            if match:
+                minutes_ago = int(match.group(1))
+                date_obj = datetime.now() - timedelta(minutes=minutes_ago)
                 return date_obj.strftime('%Y-%m-%d')
 
             return "9999-09-09"
@@ -213,7 +171,7 @@ class Scraper:
 
 if __name__ == "__main__":
     scraper = Scraper()
-    result = scraper.scrape_youtube('검은콩', limit=3)
+    result = scraper.get_list('검은콩', limit=10)
     with open('result.json', 'w', encoding='utf-8') as f:
         json.dump(result, f, ensure_ascii=False, indent=4)
 

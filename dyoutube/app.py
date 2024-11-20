@@ -132,54 +132,6 @@ async def search_video(videoid: str):
     finally:
         return result
 
-def shorts_task_(videoid: str):
-    logger = logging.getLogger('uvicorn')
-    shorts_url = f"https://www.youtube.com/shorts/{videoid}"
-    try:
-        scraper = Scraper()
-        result = scraper.get_shorts_detail(shorts_url)
-        logger.info(f"Shorts result: {result}")
-    except Exception as e:
-        logger.error(f"Error: {e} videoid : {videoid} at traceback: {traceback.print_exc()}")
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=str(e))
-    finally:
-        scraper.driver.quit()
-        return result
-
-def shorts_task(keyword: str, limit: int = 3):
-    result = {
-        'keyword' : keyword,
-        'result'  : []
-    }
-    try:
-        scraper = Scraper()
-        result = scraper.scrape_youtube(keyword, limit)
-        result = {
-            'keyword': keyword,
-            'result': result
-        }
-    except Exception as e:
-        traceback.print_exc()
-    finally:
-        return result
-
-@app.get("/search/shorts")
-async def search_shorts(keywords: str):
-    logger = logging.getLogger('uvicorn')
-    try:
-        logger.info("???")
-        loop = asyncio.get_event_loop()
-        result = await loop.run_in_executor(executor, shorts_task, keywords)
-    except Exception as e:
-        logger.error(f"Error: {e} videoid : {videoid} at traceback: {traceback.print_exc()}")
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=str(e))
-    finally:
-        return result
-
-
-
 def chrome_manage(os:str):
     if os == 'Windows':
         list_command = 'tasklist /FI "IMAGENAME eq chrome.exe"'
