@@ -93,7 +93,7 @@ async def search_list(keywords: str, limit: int = 20):
         'result'  : []
     }
     try:
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         result = await loop.run_in_executor(executor, list_task, keywords, limit)
         logger.info(f"List result: {result}")
     except Exception as e:

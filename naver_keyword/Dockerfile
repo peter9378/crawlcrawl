@@ -22,8 +22,6 @@ RUN apt-get update && apt-get install -yqq \
     libxkbcommon0 \
     libxrandr2 \
     xdg-utils \
-    vim \
-    gcc \
     libcurl3-gnutls \
     libcurl3-nss \
     libcurl4 && \
