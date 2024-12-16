@@ -11,80 +11,89 @@ import re
 import time
 from datetime import datetime, timedelta
 import traceback
+import threading
+import psutil
+
+# 전역 Lock 정의
+_lock = threading.Lock()
 
 class Scraper:
     def __init__(self):
         # 로거 인스턴스 생성
         self.logger = logging.getLogger('uvicorn')
         self.scroll_position = 0
+        self.driver = None  # 필요 시 드라이버 인스턴스 보관용
 
     def get_list(self, query: str, limit: int = 30):
-        base_url = 'https://www.youtube.com/results?search_query='
-        results = []
-        try:
-            with SeleniumDriver(start_url='https://www.youtube.com/').driver as driver:
-                self.logger.info("Driver generated!")
-                driver.get(f'{base_url}{query}')
+        # 전역 Lock을 사용하여 한 번에 하나의 요청만 처리
+        with _lock:
+            base_url = 'https://www.youtube.com/results?search_query='
+            results = []
+            try:
+                with SeleniumDriver(start_url='https://www.youtube.com/').driver as driver:
+                    self.driver = driver
+                    self.logger.info("Driver generated!")
+                    driver.get(f'{base_url}{query}')
 
-                self.scroll_down(driver, 1)
-                self.logger.info("Scroll down finished, starting crawl")
+                    self.scroll_down(driver, 1)
+                    self.logger.info("Scroll down finished, starting crawl")
 
-                while len(results) < limit:
-                    # Wait for elements to load
-                    WebDriverWait(driver, 10).until(EC.presence_of_all_elements_located((By.ID, 'thumbnail')))
-                    soup = BeautifulSoup(driver.page_source, 'html.parser')
-                    postfixs = soup.select('#dismissible #thumbnail')
-                    self.logger.info("Elements selected for parsing.")
+                    while len(results) < limit:
+                        # Wait for elements to load
+                        WebDriverWait(driver, 10).until(EC.presence_of_all_elements_located((By.ID, 'thumbnail')))
+                        soup = BeautifulSoup(driver.page_source, 'html.parser')
+                        postfixs = soup.select('#dismissible #thumbnail')
+                        self.logger.info("Elements selected for parsing.")
 
-                    for postfix in postfixs:
-                        href = postfix.get('href')
-                        if not href:
-                            continue
+                        for postfix in postfixs:
+                            href = postfix.get('href')
+                            if not href:
+                                continue
 
-                        url = f"https://www.youtube.com{href}"
-                        video_id = url.split('/')[-1] if 'shorts' in url else url.split('v=')[1]
+                            url = f"https://www.youtube.com{href}"
+                            video_id = url.split('/')[-1] if 'shorts' in url else url.split('v=')[1]
 
-                        if 'watch' in url:
-                            title, view_count, published_date = self.get_video_detail(driver, url)
-                            result = {
-                                "VideoID": video_id,
-                                "title": title,
-                                "url": url,
-                                "videoCount": view_count,
-                                "publishedDate": published_date,
-                                "videoType": "video"
-                            }
-                        elif 'shorts' in url:
-                            title, view_count, published_date = self.get_shorts_detail(driver, url)
-                            result = {
-                                "VideoID": video_id,
-                                "title": title,
-                                "url": url,
-                                "videoCount": view_count,
-                                "publishedDate": published_date,
-                                "videoType": "shorts"
-                            }
-                        else:
-                            continue
+                            if 'watch' in url:
+                                title, view_count, published_date = self.get_video_detail(driver, url)
+                                result = {
+                                    "VideoID": video_id,
+                                    "title": title,
+                                    "url": url,
+                                    "videoCount": view_count,
+                                    "publishedDate": published_date,
+                                    "videoType": "video"
+                                }
+                            elif 'shorts' in url:
+                                title, view_count, published_date = self.get_shorts_detail(driver, url)
+                                result = {
+                                    "VideoID": video_id,
+                                    "title": title,
+                                    "url": url,
+                                    "videoCount": view_count,
+                                    "publishedDate": published_date,
+                                    "videoType": "shorts"
+                                }
+                            else:
+                                continue
 
-                        results.append(result)
-                        # Stop if we reach the limit
-                        if len(results) >= limit:
-                            self.logger.info(f"Generated result count: {len(results)}")
-                            break
+                            results.append(result)
+                            # Stop if we reach the limit
+                            if len(results) >= limit:
+                                self.logger.info(f"Generated result count: {len(results)}")
+                                break
 
-                    # Scroll down only if the limit has not been reached
-                    if len(results) < limit:
-                        self.scroll_down(driver, 1)
+                        # Scroll down only if the limit has not been reached
+                        if len(results) < limit:
+                            self.scroll_down(driver, 1)
 
-            self.logger.info(f"Final result count: {len(results)}")
-            return results
-        except Exception as e:
-            self.logger.error(f"Unexpected error: {e}")
-            self.logger.error(traceback.format_exc())
-        finally:
-            self.logger.info(f"Scraping completed. result cnt: {len(results)}")
-            self.quit_driver()  # 드라이버 종료
+                self.logger.info(f"Final result count: {len(results)}")
+                return results
+            except Exception as e:
+                self.logger.error(f"Unexpected error: {e}")
+                self.logger.error(traceback.format_exc())
+            finally:
+                self.logger.info(f"Scraping completed. result cnt: {len(results)}")
+                self.quit_driver()  # 드라이버 종료
 
     def get_video_detail(self, driver, url: str):
         try:
@@ -203,7 +212,6 @@ class Scraper:
             if self.driver:
                 self.driver.quit()
                 self.logger.info("Driver successfully quit.")
-            # 좀비 프로세스 확인 및 종료
             self.kill_zombie_processes()
         except Exception as e:
             self.logger.error(f"Error quitting driver: {e}")
@@ -212,7 +220,6 @@ class Scraper:
     def kill_zombie_processes(self):
         try:
             for proc in psutil.process_iter():
-                # 프로세스 이름으로 Chrome 및 chromedriver 관련 프로세스 탐지
                 if proc.name() in ["chrome", "chromedriver"]:
                     self.logger.info(f"Terminating process: {proc.name()} (PID: {proc.pid})")
                     proc.terminate()  # 종료 시도
@@ -224,5 +231,4 @@ class Scraper:
         except Exception as e:
             self.logger.error(f"Error killing zombie processes: {e}")
             self.logger.error(traceback.format_exc())
-
 
