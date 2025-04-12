@@ -3,6 +3,7 @@ import logging
 import re
 import time
 import traceback
+import asyncio
 from datetime import datetime, timezone, timedelta
 from dateutil.relativedelta import relativedelta
 
@@ -15,16 +16,25 @@ from selenium.common.exceptions import (
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 
+from playwright.sync_api import sync_playwright
+
+
 # 개선된 셀레니움 드라이버(사용 환경에 맞춰 구현)
 from selenium_driver import SeleniumDriver
-
 
 class Scraper:
     def __init__(self):
         # FastAPI 기반 uvicorn 로거 사용 가정
         self.logger = logging.getLogger("uvicorn")
 
-    def get_list(self, query: str, limit: int = 30):
+    async def get_list(self, query: str, limit: int = 30):
+        async with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)  # headless=False는 브라우저가 눈에 보이도록 설정
+            page = browser.new_page()
+            page.goto(f'https://search.shopping.naver.com/ns/search?query={query}')
+            print(page.title())
+            browser.close()
+        sleep(1000000)
         """
         주어진 query(검색어)로 유튜브 검색 결과를 크롤링.
         최대 limit개의 동영상 정보를 리스트 형태로 반환.

@@ -9,7 +9,6 @@ import time
 from datetime import datetime, timedelta
 import traceback
 
-
 from selenium_driver import SeleniumDriver  # 개선된 selenium_driver import
 
 class Scraper:
@@ -35,65 +34,32 @@ class Scraper:
 
                 while len(results) < limit and scroll_attempt < max_scroll_attempts:
                     try:
-                        time.sleep(3)
+                        WebDriverWait(driver, 10).until(EC.presence_of_all_elements_located((By.ID, 'contents')))
                     except TimeoutException:
                         self.logger.warning("Timeout waiting for video elements, trying to scroll again...")
 
-                    video_elements = driver.find_elements(By.CSS_SELECTOR, "a#video-title")
-                    video_links = []
+                    soup = BeautifulSoup(driver.page_source, 'html.parser')
+                    print(soup)
+                    postfixs = soup.find('div', class_='style-scope ytd-section-list-renderer').find_all('yt-formatted-string')
+                    print(len(postfixs))
 
-                    for element in video_elements[:limit]:
-                        href = element.get_attribute('href')
-                        if href and "watch" in href:
-                            video_links.append(href)
-                    results = []
-                    for link in video_links:
-                        # 각 동영상을 새 탭으로 열기
-                        driver.execute_script(f"window.open('{link}', '_blank');")
-                        driver.switch_to.window(driver.window_handles[-1])
-                        time.sleep(1)
-                        try:
-                            more_button = driver.find_element(By.CSS_SELECTOR, "tp-yt-paper-button#expand")
-                            more_button.click()
-                            time.sleep(1)
-                        except:
-                            pass
-                        html = driver.page_source
-                        soup = BeautifulSoup(html, 'html.parser')
+                        #        "VideoID": video_id,
+                        #        "title": title,
+                        #        "url": url,
+                        #        "videoCount": view_count,
+                        #        "channel": channel,
+                        #        "description": description,
+                        #        "publishedDate": published_date,
+                        #        "videoType": "shorts"
+                        #if title is None and view_count is None and published_date is None:
+                        #    # 세부 정보 추출 실패 시 다음으로
+                        #    continue
 
-                        title_tag = soup.select_one("h1.title yt-formatted-string")
-                        title = title_tag.text.strip() if title_tag else None
+                        #results.append(result)
 
-                        view_count_tag = soup.select_one("span.view-count")
-                        view_count = view_count_tag.text.strip() if view_count_tag else None
- 
-                        channel_name_tag = soup.select_one("ytd-channel-name div#text-container a")
-                        channel_name = channel_name_tag.text.strip() if channel_name_tag else None
-
-                        description_tag = soup.select_one("#description yt-formatted-string")
-                        description = description_tag.text.strip() if description_tag else None
-
-                        published_date_meta = soup.select_one("meta[itemprop='datePublished']")
-                        published_date = published_date_meta['content'] if published_date_meta else None
-
-                        video_type = "shorts" if "shorts" in link else "video"
-                        video_data = {
-                            "VideoID": href,
-                            "title": title,
-                            "url": link,
-                            "viewCount": view_count,
-                            "channel": channel_name,
-                            "description": description,
-                            "publishedDate": published_date,
-                            "videoType": video_type
-                        }
-                        results.append(video_data)
-
-                        driver.close()
-                        driver.switch_to.window(driver.window_handles[0])
-
-                    #driver.quit()
-                    return results
+                        #if len(results) >= limit:
+                        #    self.logger.info(f"Collected {len(results)} results. Reached limit.")
+                        #    break
 
                 self.logger.info(f"Final result count: {len(results)}")
                 return results

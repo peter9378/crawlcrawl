@@ -3,12 +3,12 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException, WebDriverException
 from selenium.webdriver.common.by import By
 from bs4 import BeautifulSoup
+import json
 import logging
 import re
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timezone, timedelta
 import traceback
-
 
 from selenium_driver import SeleniumDriver  # 개선된 selenium_driver import
 
@@ -33,67 +33,72 @@ class Scraper:
                 scroll_attempt = 0
                 max_scroll_attempts = 10
 
-                while len(results) < limit and scroll_attempt < max_scroll_attempts:
-                    try:
-                        time.sleep(3)
-                    except TimeoutException:
-                        self.logger.warning("Timeout waiting for video elements, trying to scroll again...")
+                while len(results) < limit:
+                    soup = BeautifulSoup(driver.page_source, 'html.parser')
+                    postfixs = soup.select('#dismissible #thumbnail')
+                    items_div = soup.find("div", id="items", class_="style-scope yt-horizontal-list-renderer")
+                    print(str(items_div))
+                    print("==========================")
+                    print(postfixs)
+                    shorts_html = str(items_div)
+                    shorts_soup = BeautifulSoup(shorts_html, "html.parser")
 
-                    video_elements = driver.find_elements(By.CSS_SELECTOR, "a#video-title")
-                    video_links = []
+                    for postfix in postfixs:
+                        href = postfix.get('href')
+                        if not href:
+                            continue
 
-                    for element in video_elements[:limit]:
-                        href = element.get_attribute('href')
-                        if href and "watch" in href:
-                            video_links.append(href)
-                    results = []
-                    for link in video_links:
-                        # 각 동영상을 새 탭으로 열기
-                        driver.execute_script(f"window.open('{link}', '_blank');")
-                        driver.switch_to.window(driver.window_handles[-1])
-                        time.sleep(1)
-                        try:
-                            more_button = driver.find_element(By.CSS_SELECTOR, "tp-yt-paper-button#expand")
-                            more_button.click()
-                            time.sleep(1)
-                        except:
-                            pass
-                        html = driver.page_source
-                        soup = BeautifulSoup(html, 'html.parser')
+                        url = f"https://www.youtube.com{href}"
+                        if ('watch' not in url) and ('shorts' not in url):
+                            continue
 
-                        title_tag = soup.select_one("h1.title yt-formatted-string")
-                        title = title_tag.text.strip() if title_tag else None
+                        video_id = url.split('/')[-1] if 'shorts' in url else url.split('v=')[1]
 
-                        view_count_tag = soup.select_one("span.view-count")
-                        view_count = view_count_tag.text.strip() if view_count_tag else None
- 
-                        channel_name_tag = soup.select_one("ytd-channel-name div#text-container a")
-                        channel_name = channel_name_tag.text.strip() if channel_name_tag else None
+                        if 'watch' in url:
+                            result = {}
+                            results.append(result)
+                            continue
+                            title, view_count, published_date, channel, description = self.get_video_detail(driver, url)
+                            result = {
+                                "VideoID": video_id,
+                                "title": title,
+                                "url": url,
+                                "videoCount": view_count,
+                                "channel": channel,
+                                "description": description,
+                                "publishedDate": published_date,
+                                "videoType": "video"
+                            }
+                        elif 'shorts' in url:
+                            meta_tag = shorts_soup.find("a", href=href)
+                            h3_tag = meta_tag.find_next("h3")
+                            meta_data = h3_tag["aria-label"]
+                            title = meta_data.split(",")[0]
+                            view_count = meta_data.split(", ")[1].split(" - ")[0].replace('조회수 ', '').replace('회', '').strip()
 
-                        description_tag = soup.select_one("#description yt-formatted-string")
-                        description = description_tag.text.strip() if description_tag else None
+                            published_date, channel, description = self.get_shorts_detail(driver, url)
+                            result = {
+                                "VideoID": video_id,
+                                "title": title,
+                                "url": url,
+                                "videoCount": view_count,
+                                "channel": channel,
+                                "description": description,
+                                "publishedDate": published_date,
+                                "videoType": "shorts"
+                            }
+                        else:
+                            continue
 
-                        published_date_meta = soup.select_one("meta[itemprop='datePublished']")
-                        published_date = published_date_meta['content'] if published_date_meta else None
+                        if title is None and view_count is None and published_date is None:
+                            # 세부 정보 추출 실패 시 다음으로
+                            continue
 
-                        video_type = "shorts" if "shorts" in link else "video"
-                        video_data = {
-                            "VideoID": href,
-                            "title": title,
-                            "url": link,
-                            "viewCount": view_count,
-                            "channel": channel_name,
-                            "description": description,
-                            "publishedDate": published_date,
-                            "videoType": video_type
-                        }
-                        results.append(video_data)
+                        results.append(result)
 
-                        driver.close()
-                        driver.switch_to.window(driver.window_handles[0])
-
-                    #driver.quit()
-                    return results
+                        if len(results) >= limit:
+                            self.logger.info(f"Collected {len(results)} results. Reached limit.")
+                            break
 
                 self.logger.info(f"Final result count: {len(results)}")
                 return results
@@ -108,28 +113,25 @@ class Scraper:
         try:
             self.logger.info(f"Fetching video details for URL: {url}")
             driver.get(url)
-            WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.ID, 'microformat')))
+            wait = WebDriverWait(driver, 10)
+            wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "div#microformat")))
+
             soup = BeautifulSoup(driver.page_source, 'html.parser')
+            soup_tag = script_tag = soup.find("div", {"id": "microformat"}).find("script", {"type": "application/ld+json"})
+            data = json.loads(soup_tag.string)
 
             # 제목 추출
-            title_element = soup.find('yt-formatted-string', class_='style-scope ytd-video-description-header-renderer')
-            title = title_element.text.strip() if title_element else None
+            title = data.get("name")
 
             # 조회수
-            view_count_element = soup.select_one('span.view-count')
-            view_count_text = view_count_element.get_text(strip=True) if view_count_element else None
-            view_count_number = re.sub(r'[^0-9]', '', view_count_text) if view_count_text else None
+            view_count_number = data.get("interactionCount")
 
             # 업로드 날짜
-            published_info = soup.select_one('#info-strings yt-formatted-string')
-            published_date_text = published_info.text.strip() if published_info else None
-            published_date = self.convert_date(published_date_text) if published_date_text else None
+            published_date = self.to_kst(data.get("uploadDate"))
 
-            channel_element = soup.find('yt-formatted-string', id='text').find('a', class_='yt-simple-endpoint style-scope yt-formatted-string')
-            channel = channel_element.get_text() if channel_element else None
+            channel = data.get("author")
 
-            description_element = soup.find('span', class_='yt-core-attributed-string--link-inherit-color')
-            description = description_element.get_text() if description_element else None
+            description = data.get("description")
 
             return title, view_count_number, published_date, channel, description
         except TimeoutException:
@@ -146,10 +148,6 @@ class Scraper:
             driver.get(url)
             WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.ID, 'menu-button')))
             soup = BeautifulSoup(driver.page_source, 'html.parser')
-
-            title_element = soup.find('span', class_='yt-core-attributed-string')
-            title = title_element.get_text() if title_element else None
-            print(title)
 
             channel_element = soup.find('link', itemprop="name")
             channel = channel_element['content'] if channel_element and 'content' in channel_element.attrs else None
@@ -174,6 +172,33 @@ class Scraper:
                 else:
                     published_date = self.convert_date(aria_label)
 
+            return published_date, channel, description
+        except TimeoutException:
+            self.logger.warning(f"Timeout fetching shorts details for URL: {url}")
+            return None, None, None
+        except Exception as e:
+            self.logger.error(f"Error extracting shorts details: {e}")
+            self.logger.error(traceback.format_exc())
+            return None, None, None
+
+            #title_element = soup.find('yt-formatted-string', class_='style-scope ytd-video-description-header-renderer')
+            #title = title_element.text.strip() if title_element else None
+
+            #factoids = soup.find_all('factoid-renderer', class_='YtwFactoidRendererHost')
+
+            #view_count = None
+            #published_date = None
+
+            #for factoid in factoids:
+            #    div = factoid.find('div', class_='YtwFactoidRendererFactoid')
+            #    aria_label = div.get('aria-label', '')
+            #    if 'views' in aria_label:
+            #        view_count = aria_label.replace(' views', '').replace(',', '').strip()
+            #    else:
+            #        published_date = self.convert_date(aria_label)
+            #channel = ""
+            #description = ""
+#
             return title, view_count, published_date, channel, description
         except TimeoutException:
             self.logger.warning(f"Timeout fetching shorts details for URL: {url}")
@@ -182,6 +207,13 @@ class Scraper:
             self.logger.error(f"Error extracting shorts details: {e}")
             self.logger.error(traceback.format_exc())
             return None, None, None
+
+    def to_kst(self, timestamp: str):
+        dt = datetime.fromisoformat(timestamp)
+        kst = timezone(timedelta(hours=9))
+        dt_kst = dt.astimezone(kst)
+        return dt_kst.isoformat()
+
 
     def scroll_down(self, driver, nloop: int = 1):
         try:
