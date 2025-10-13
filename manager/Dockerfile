@@ -1,4 +1,4 @@
-FROM python:3.8-slim
+FROM python:3.12-bookworm AS builder
 
 # Install openssh-client and curl
 RUN apt-get update && apt-get install -y --no-install-recommends \

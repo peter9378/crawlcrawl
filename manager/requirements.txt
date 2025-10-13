@@ -1,4 +1,7 @@
 fastapi
 uvicorn[standard]
 aiohttp
-
+python-dateutil
+beautifulsoup4
+selenium
+webdriver-manager
