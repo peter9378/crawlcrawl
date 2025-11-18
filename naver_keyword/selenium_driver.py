@@ -1,17 +1,20 @@
 from selenium import webdriver
 from selenium.webdriver import ChromeOptions
 from selenium.common.exceptions import WebDriverException
-from selenium.webdriver.chrome.service import Service
-from webdriver_manager.chrome import ChromeDriverManager
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
 import time
 import os
+import traceback
+import logging
 
 class SeleniumDriver:
-    def __init__(self, start_url='https://www.youtube.com/'):
+    def __init__(self, start_url='https://www.naver.com/'):
         self.driver = None
         self.start_url = start_url
         self.options = self._get_options()
-        self.set_up()
+        self.logger = logging.getLogger('uvicorn')
 
     def _get_options(self):
         options = ChromeOptions()
@@ -20,19 +23,26 @@ class SeleniumDriver:
         options.add_argument('--window-size=300,600')
         options.add_argument('--disable-gpu')
         options.add_argument('--no-sandbox')
+        options.add_argument('--disable-sync')
+        #options.add_argument('--disable-background-networking')
+        options.add_argument('--safebrowsing-disable-auto-update')
+        options.add_argument('--disable-domain-reliability')
+        options.add_argument('--disable-component-extensions-with-background-pages')
+        options.add_argument('--incognito')
         options.add_argument('--disable-dev-shm-usage')
         options.add_argument('--disable-extensions')
         options.add_argument('--disable-notifications')
         options.add_argument('--disable-popup-blocking')
         options.add_argument('--disable-translate')
-        options.add_argument('--disable-background-timer-throttling')
+        #options.add_argument('--disable-background-timer-throttling')
         options.add_argument('--disable-renderer-backgrounding')
         options.add_argument('--disable-device-discovery-notifications')
         options.add_argument('--mute-audio')
         options.add_argument('--blink-settings=imagesEnabled=false')  # Disable images
         options.add_argument('--disable-features=SearchProviderFirstRun')
         options.add_argument('--disable-geolocation')
-        options.page_load_strategy = 'eager'  # Load only the DOM content, which is faster
+        options.page_load_strategy = 'eager'  # faster DOM load
+        
         prefs = {
             "profile.managed_default_content_settings.images": 2,  # Disable images
             "profile.default_content_setting_values.notifications": 2,  # Disable notifications
@@ -43,12 +53,19 @@ class SeleniumDriver:
         return options
 
     def set_up(self):
-        try:
-            self.driver = webdriver.Chrome(options=self.options)
-            self.driver.get(self.start_url)
-        except WebDriverException as e:
-            print(f"Error setting up the driver: {e}")
-            self.driver = None
+         try:
+             self.driver = webdriver.Chrome(options=self.options)
+             self.driver.get(self.start_url)
+         except WebDriverException as e:
+             print(f"Error setting up the driver: {e}")
+             self.driver = None
+
+    def __enter__(self):
+        self.set_up()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.remove_driver()
 
     def get_page_source(self):
         if self.driver:
@@ -65,16 +82,25 @@ class SeleniumDriver:
 
     def restart_driver(self):
         self.remove_driver()
-        time.sleep(2.5)  # Consider reducing or removing the sleep if unnecessary
+        time.sleep(2.5)
         self.set_up()
 
-if __name__ == "__main__":
-    selenium_driver = SeleniumDriver()
-    if selenium_driver.health_check():
-        print("Driver is healthy and running.")
-        html_content = selenium_driver.get_page_source()
-        print("Page source retrieved.")
-    else:
-        print("Driver setup failed.")
-    selenium_driver.remove_driver()
+    def scroll_down(self, nloop: int = 1):
+        """
+        네이버 검색결과 페이지에서 nloop만큼 스크롤하여
+        더 많은 결과를 로드합니다.
+        """
+        if not self.driver:
+            self.logger.error("Driver is not initialized")
+            return
+        
+        try:
+            scroll_increment = 300
+            for i in range(nloop):
+                self.driver.execute_script(f"window.scrollBy(0, {scroll_increment});")
+                time.sleep(1)
+                self.logger.info(f"Scrolled down by {scroll_increment} pixels (iteration {i+1}/{nloop})")
+        except WebDriverException as e:
+            self.logger.error(f"Error during scroll: {e}")
+            self.logger.error(traceback.format_exc())
 
