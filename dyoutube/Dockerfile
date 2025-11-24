@@ -2,6 +2,8 @@ FROM python:3.8-slim
 
 RUN apt-get update && apt-get install -yqq \
     wget \
+    build-essential \
+    python3-dev \
     fonts-liberation \
     libasound2 \
     libatk-bridge2.0-0 \
