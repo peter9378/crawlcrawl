@@ -22,8 +22,6 @@ RUN apt-get update && apt-get install -yqq \
     libxkbcommon0 \
     libxrandr2 \
     xdg-utils \
-    vim \
-    gcc \
     libcurl3-gnutls \
     libcurl3-nss \
     libcurl4 && \
@@ -39,6 +37,13 @@ COPY . .
 RUN pip install --upgrade pip && \
     pip install --no-cache-dir -r requirements.txt
 
-CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "80", "--reload"]
+# Gunicorn + Uvicorn workers로 실행
+# gunicorn.conf.py 파일에서 설정 관리
+# 주요 설정:
+# - workers: 2 (환경변수 GUNICORN_WORKERS로 조정 가능)
+# - worker-class: uvicorn.workers.UvicornWorker (ASGI 지원)
+# - max-requests: 1000 (메모리 누수 방지를 위한 자동 워커 재시작)
+# - timeout: 120초 (Selenium 작업을 위한 긴 타임아웃)
+CMD ["gunicorn", "app:app", "-c", "gunicorn.conf.py"]
 
 

@@ -15,8 +15,9 @@ from selenium.common.exceptions import (
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 
-# 개선된 셀레니움 드라이버(사용 환경에 맞춰 구현)
+# 개선된 셀레니움 드라이버 풀 사용
 from selenium_driver import SeleniumDriver
+from selenium_pool import get_driver_pool
 
 
 class Scraper:
@@ -28,40 +29,53 @@ class Scraper:
         """
         주어진 query(검색어)로 유튜브 검색 결과를 크롤링.
         최대 limit개의 동영상 정보를 리스트 형태로 반환.
+        드라이버 풀을 사용하여 성능을 개선합니다.
         """
-        base_url = "https://www.youtube.com/results?search_query="
+        base_url = f"https://www.youtube.com/results?search_query={query}"
         results = []
 
         try:
-            # 브라우저/드라이버 실행
-            with SeleniumDriver(start_url="https://www.youtube.com/") as selenium_context:
-                driver = selenium_context.driver
+            self.logger.info(f"[YOUTUBE] Starting scrape for query: {query}, limit: {limit}")
+            
+            # 드라이버 풀에서 드라이버 가져오기 (새 탭에서 실행)
+            pool = get_driver_pool()
+            
+            with pool.get_driver(base_url) as driver_wrapper:
+                driver = driver_wrapper.driver
+                
+                self.logger.info("[YOUTUBE] Driver obtained from pool. Page loaded.")
+                
+                # 페이지가 완전히 로드될 때까지 대기
+                time.sleep(2)
 
-                # 암묵적 대기(최대 5초)
-                driver.implicitly_wait(5)
-
-                self.logger.info("Driver initialized. Navigating to search page.")
-                driver.get(f"{base_url}{query}")
-
-                self.logger.info("Start scrolling...")
-                self.scroll_down(driver, nloop=limit + 1)
-                time.sleep(2)  # 페이지 로딩이 완전히 끝날 때까지 대기
+                self.logger.info("[YOUTUBE] Start scrolling...")
+                try:
+                    driver_wrapper.scroll_down(nloop=limit + 1, scroll_increment=300, delay=1.0)
+                    time.sleep(2)  # 페이지 로딩이 완전히 끝날 때까지 대기
+                except Exception as e:
+                    self.logger.warning(f"[YOUTUBE] Error during scroll: {e}, continuing anyway...")
 
                 # 검색 결과 페이지 파싱
-                soup = BeautifulSoup(driver.page_source, "html.parser")
+                html_content = driver_wrapper.get_page_source()
+                
+                if not html_content or len(html_content) < 100:
+                    self.logger.error("[YOUTUBE] Page source is empty or too short")
+                    return results
+                
+                soup = BeautifulSoup(html_content, "html.parser")
                 all_items = soup.select("ytd-video-renderer, ytd-reel-item-renderer")
 
-                self.logger.info(f"Parsed {len(all_items)} items from search page.")
+                self.logger.info(f"[YOUTUBE] Parsed {len(all_items)} items from search page.")
                 results = self._parse_items(driver, all_items, limit)
-                self.logger.info(f"Scraped total {len(results)} items.")
+                self.logger.info(f"[YOUTUBE] Scraped total {len(results)} items.")
 
         except Exception as e:
-            self.logger.error(f"Unexpected error in get_list(): {e}")
+            self.logger.error(f"[YOUTUBE] Unexpected error in get_list(): {e}")
             self.logger.error(traceback.format_exc())
 
         finally:
             # 크롤링이 길어져 응답 시간이 초과되면 504 발생 가능
-            self.logger.info(f"Final result count: {len(results)}")
+            self.logger.info(f"[YOUTUBE] Final result count: {len(results)}")
 
         return results
 
@@ -188,20 +202,6 @@ class Scraper:
 
         return results
 
-    def scroll_down(self, driver, nloop: int = 1):
-        """
-        유튜브의 검색결과 페이지에서 nloop만큼 스크롤하여
-        더 많은 결과를 로드합니다.
-        """
-        try:
-            scroll_increment = 300
-            for i in range(nloop):
-                driver.execute_script(f"window.scrollBy(0, {scroll_increment});")
-                time.sleep(1)
-                self.logger.debug(f"Scrolled down by {scroll_increment} pixels")
-        except WebDriverException as e:
-            self.logger.error(f"Error during scroll: {e}")
-            self.logger.error(traceback.format_exc())
 
     def calculate_before_date(self, input_str: str):
         """
