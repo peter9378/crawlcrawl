@@ -5,11 +5,78 @@ import traceback
 import time
 import random
 from urllib.parse import quote
+from typing import Optional, Dict, Any
+from functools import wraps
 
 # 개선된 셀레니움 드라이버(사용 환경에 맞춰 구현)
 from selenium_driver import SeleniumDriver
+from selenium_pool import get_driver_pool
+
+
+class ScraperException(Exception):
+    """스크래핑 실패 시 발생하는 예외"""
+    pass
+
+
+def retry_with_exponential_backoff(
+    max_retries: int = 5,
+    initial_delay: float = 1.0,
+    max_delay: float = 60.0,
+    exponential_base: float = 2.0,
+    exceptions: tuple = (Exception,)
+):
+    """지수 백오프를 사용한 재시도 데코레이터
+    
+    Args:
+        max_retries: 최대 재시도 횟수
+        initial_delay: 초기 대기 시간 (초)
+        max_delay: 최대 대기 시간 (초)
+        exponential_base: 지수 증가 베이스
+        exceptions: 재시도할 예외 타입들
+    """
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            delay = initial_delay
+            last_exception = None
+            
+            for attempt in range(max_retries):
+                try:
+                    return func(*args, **kwargs)
+                except exceptions as e:
+                    last_exception = e
+                    if attempt == max_retries - 1:
+                        # 마지막 시도에서도 실패하면 예외 발생
+                        raise ScraperException(
+                            f"Failed after {max_retries} attempts: {str(e)}"
+                        ) from e
+                    
+                    # 로깅
+                    logger = logging.getLogger('uvicorn')
+                    logger.warning(
+                        f"Attempt {attempt + 1}/{max_retries} failed: {str(e)}. "
+                        f"Retrying in {delay:.2f} seconds..."
+                    )
+                    
+                    # 지수 백오프 대기
+                    time.sleep(delay + random.uniform(0, delay * 0.1))
+                    
+                    # 다음 재시도를 위한 delay 증가
+                    delay = min(delay * exponential_base, max_delay)
+            
+            # 이 코드에 도달하면 안되지만, 안전장치
+            if last_exception:
+                raise last_exception
+                
+        return wrapper
+    return decorator
 
 class Scraper:
+    # 네트워크 요청 타임아웃 (초)
+    REQUEST_TIMEOUT = 30
+    # 세션 복구를 위한 최대 재시도 횟수
+    SESSION_RESET_MAX_RETRIES = 3
+    
     def __init__(self):
         # Logger instance
         self.logger = logging.getLogger('uvicorn')
@@ -23,8 +90,25 @@ class Scraper:
             'sec-ch-ua-mobile': '?0',
         }
         # 쿠키 저장용 세션 객체
+        self.session = None
+        self._initialize_session()
+    
+    def _initialize_session(self):
+        """세션 초기화 또는 재생성"""
+        if self.session:
+            try:
+                self.session.close()
+            except Exception as e:
+                self.logger.warning(f"Error closing old session: {e}")
+        
         self.session = requests.Session()
         self.update_user_agent()
+        self.logger.info("Session initialized/reset successfully")
+    
+    def _reset_session_on_error(self):
+        """에러 발생 시 세션 리셋"""
+        self.logger.warning("Resetting session due to errors...")
+        self._initialize_session()
         
     def update_user_agent(self):
         """랜덤 User-Agent 생성 및 업데이트"""
@@ -139,111 +223,120 @@ class Scraper:
         self.session.headers.update(self.headers)
         self.logger.info(f"Updated User-Agent: {user_agent}")
 
-    def fetch_page(self, url, max_retries=3, base_delay=0.1):
-        """페이지 내용을 가져오는 함수"""
+    def fetch_page(self, url: str, max_retries: int = 5, base_delay: float = 0.1) -> Optional[str]:
+        """페이지 내용을 가져오는 함수
+        
+        Args:
+            url: 가져올 URL
+            max_retries: 최대 재시도 횟수
+            base_delay: 기본 지연 시간 (초)
+            
+        Returns:
+            HTML 페이지 내용 또는 실패 시 None
+            
+        Raises:
+            ScraperException: 모든 재시도 실패 시
+        """
         self.logger.info(f"Fetching URL: {url}")
+        last_exception = None
+        
         for attempt in range(max_retries):
             try:
-                # 요청마다 User-Agent 업데이트
-                if attempt > 0:  # 재시도 시에만 User-Agent 변경
+                # 재시도 시 User-Agent 업데이트 및 세션 복구
+                if attempt > 0:
                     self.update_user_agent()
+                    
+                    # 3번째 재시도부터는 세션 리셋
+                    if attempt >= 2:
+                        self._reset_session_on_error()
                 
-                # 요청 간 랜덤 지연 시간 추가 (0.05~0.8초)
+                # Rate limiting을 위한 랜덤 지연
                 delay = base_delay + random.uniform(0.1, 0.7)
                 time.sleep(delay)
                 
-                self.logger.info(f"Request attempt {attempt+1} with delay {delay:.2f}s")
-                response = self.session.get(url)
-                response.raise_for_status()  # 에러 발생 시 예외 발생
+                self.logger.info(f"Request attempt {attempt+1}/{max_retries} with delay {delay:.2f}s")
+                
+                # timeout 설정으로 무한 대기 방지
+                response = self.session.get(
+                    url,
+                    timeout=self.REQUEST_TIMEOUT,
+                    allow_redirects=True
+                )
+                
+                # HTTP 에러 체크
+                response.raise_for_status()
+                
+                # 응답 검증
+                if not response.text or len(response.text) < 100:
+                    raise requests.RequestException("Response content too short or empty")
                 
                 # 성공적으로 응답 받았을 때 쿠키 저장
                 self.session.cookies.update(response.cookies)
                 
+                self.logger.info(f"Successfully fetched page (length: {len(response.text)})")
                 return response.text
+                
+            except requests.Timeout as e:
+                last_exception = e
+                self.logger.error(f"Timeout error (attempt {attempt+1}/{max_retries}): {e}")
+                
+            except requests.ConnectionError as e:
+                last_exception = e
+                self.logger.error(f"Connection error (attempt {attempt+1}/{max_retries}): {e}")
+                
+            except requests.HTTPError as e:
+                last_exception = e
+                status_code = e.response.status_code if e.response else 'Unknown'
+                self.logger.error(f"HTTP error {status_code} (attempt {attempt+1}/{max_retries}): {e}")
+                
+                # 특정 HTTP 에러는 재시도하지 않음
+                if e.response and e.response.status_code in [400, 401, 403, 404]:
+                    self.logger.error(f"Non-retryable HTTP error {status_code}, failing immediately")
+                    break
+                    
             except requests.RequestException as e:
-                self.logger.error(f"Error fetching page (attempt {attempt+1}/{max_retries}): {e}")
-                if attempt == max_retries - 1:
-                    return None
-                # 재시도 전 지수 백오프 적용
-                time.sleep((2 ** attempt) + random.uniform(0, 1))
-        return None
-
-    def scrape_naver_related(self, query: str):
-        base_url = f'https://search.naver.com/search.naver?where=nexearch&sm=top_hty&fbm=0&ie=utf8&query={quote(query)}'
-        results = {
-            'keyword': query,
-            'result': []
-        }
-        try:
-            self.logger.info("Fetching page content")
-            html_content = self.fetch_page(base_url)
+                last_exception = e
+                self.logger.error(f"Request error (attempt {attempt+1}/{max_retries}): {e}")
             
-            if not html_content:
-                self.logger.error("Failed to fetch page content")
-                return results
-                
-            soup = BeautifulSoup(html_content, 'html.parser')
-            self.logger.info("Page content parsed with BeautifulSoup")
-
-            ul = soup.find('ul', class_='lst_related_srch _list_box')
-            if ul:
-                tit_divs = ul.find_all('div', class_='tit')
-                if len(tit_divs) > 0:
-                    rank = 1
-                    for div in tit_divs:
-                        results['result'].append({
-                            'rank': rank,
-                            'keyword': div.get_text()
-                        })
-                        rank = rank + 1
-            else:
-                self.logger.warn(f"{query}에 해당하는 연관검색어가 없습니다.")
-
-            self.logger.info(f"Final result count: {len(results['result'])}")
-            return results
-        except Exception as e:
-            self.logger.error(f"Unexpected error: {e}")
-            self.logger.error(traceback.format_exc())
-            return results
-
-    def scrape_naver_popular(self, query: str):
-        base_url = f'https://search.naver.com/search.naver?where=nexearch&sm=top_hty&fbm=0&ie=utf8&query={quote(query)}'
-        results = {
-            'keyword': query,
-            'result': []
-        }
-        try:
-            self.logger.info("Fetching page content")
-            html_content = self.fetch_page(base_url)
+            except Exception as e:
+                last_exception = e
+                self.logger.error(f"Unexpected error (attempt {attempt+1}/{max_retries}): {e}")
+                self.logger.error(traceback.format_exc())
             
-            if not html_content:
-                self.logger.error("Failed to fetch page content")
-                return results
-                
-            soup = BeautifulSoup(html_content, 'html.parser')
-            self.logger.info("Page content parsed with BeautifulSoup")
+            # 마지막 시도가 아니면 지수 백오프 대기
+            if attempt < max_retries - 1:
+                backoff_delay = min((2 ** attempt) + random.uniform(0, 1), 30)
+                self.logger.info(f"Backing off for {backoff_delay:.2f} seconds before retry...")
+                time.sleep(backoff_delay)
+        
+        # 모든 재시도 실패
+        error_msg = f"Failed to fetch {url} after {max_retries} attempts"
+        if last_exception:
+            error_msg += f": {str(last_exception)}"
+        
+        self.logger.error(error_msg)
+        raise ScraperException(error_msg)
 
-            keyword_spans = soup.select('span.fds-comps-keyword-chip-text')
-            keywords = [span.get_text(strip=True) for span in keyword_spans]
-
-            rank = 1
-            for keyword in keywords:
-                results['result'].append({
-                    'rank': rank,
-                    'keyword': keyword
-                })
-                rank = rank + 1
-
-            self.logger.info(f"Final result count: {len(results['result'])}")
-            return results
-        except Exception as e:
-            self.logger.error(f"Unexpected error: {e}")
-            self.logger.error(traceback.format_exc())
-        finally:
-            self.logger.info(f"Scraping completed. result cnt: {len(results['result'])}")
-            return results
-
-    def scrape_naver_together(self, query: str):
+    @retry_with_exponential_backoff(
+        max_retries=3,
+        initial_delay=1.5,
+        max_delay=30.0,
+        exceptions=(ScraperException, Exception)
+    )
+    def scrape_naver_related(self, query: str) -> Dict[str, Any]:
+        """네이버 연관검색어 스크래핑 (Selenium 드라이버 풀 사용)
+        
+        드라이버를 매번 생성하지 않고 풀에서 재사용하여 속도를 대폭 개선합니다.
+        
+        Args:
+            query: 검색 키워드
+            
+        Returns:
+            {'keyword': str, 'result': [{'rank': int, 'keyword': str}, ...]}
+            
+        Raises:
+            ScraperException: 스크래핑 실패 시
+        """
         base_url = f'https://search.naver.com/search.naver?where=nexearch&sm=top_hty&fbm=0&ie=utf8&query={quote(query)}'
         results = {
             'keyword': query,
@@ -251,38 +344,239 @@ class Scraper:
         }
         
         try:
-            self.logger.info(f"Fetching URL with Selenium: {base_url}")
+            self.logger.info(f"[RELATED] Starting Selenium scrape for keyword: {query}")
+            self.logger.info(f"[RELATED] URL: {base_url}")
             
-            # 브라우저/드라이버 실행
-            with SeleniumDriver(start_url=base_url) as selenium_context:
-                driver = selenium_context.driver
+            # 드라이버 풀에서 드라이버 가져오기 (새 탭에서 실행)
+            pool = get_driver_pool()
+            
+            with pool.get_driver(base_url) as driver_wrapper:
+                driver = driver_wrapper.driver
                 
-                # 암묵적 대기(최대 5초)
-                driver.implicitly_wait(5)
-                
-                self.logger.info("Driver initialized. Page loaded.")
+                self.logger.info("[RELATED] Driver obtained from pool. Page loaded.")
                 
                 # 페이지가 완전히 로드될 때까지 대기
-                time.sleep(2)
+                time.sleep(1)
                 
-                # 현재 페이지 정보 로깅
-                self.logger.info(f"Current page title: {driver.title}")
-                self.logger.info(f"Current URL: {driver.current_url}")
-                
-                # 스크롤을 통해 동적 콘텐츠 로드
-                self.logger.info("Start scrolling...")
-                selenium_context.scroll_down(nloop=5)  # 5번 스크롤
-                time.sleep(2)  # 페이지 로딩이 완전히 끝날 때까지 대기
+                # 연관검색어는 약간만 스크롤 (2회)
+                self.logger.info("[RELATED] Scrolling to load related keywords...")
+                try:
+                    driver_wrapper.scroll_down(nloop=2, scroll_increment=300)
+                    time.sleep(0.5)  # 스크롤 후 로딩 대기
+                except Exception as e:
+                    self.logger.warning(f"[RELATED] Error during scroll: {e}, continuing anyway...")
                 
                 # 페이지 소스 가져오기
-                html_content = driver.page_source
+                html_content = driver_wrapper.get_page_source()
+                
+                if not html_content or len(html_content) < 100:
+                    raise ScraperException("[RELATED] Page source is empty or too short")
+                
                 soup = BeautifulSoup(html_content, 'html.parser')
-                self.logger.info("Page content parsed with BeautifulSoup")
+                self.logger.info("[RELATED] Page content parsed with BeautifulSoup")
+
+                # 연관검색어 추출
+                ul = soup.find('ul', class_='lst_related_srch _list_box')
+                if ul:
+                    tit_divs = ul.find_all('div', class_='tit')
+                    if len(tit_divs) > 0:
+                        rank = 1
+                        for div in tit_divs:
+                            keyword_text = div.get_text(strip=True)
+                            if keyword_text:  # 빈 문자열 제외
+                                results['result'].append({
+                                    'rank': rank,
+                                    'keyword': keyword_text
+                                })
+                                rank += 1
+                                self.logger.debug(f"[RELATED] Extracted keyword #{rank}: {keyword_text}")
+                    else:
+                        self.logger.warning(f"[RELATED] No related keywords found for: {query}")
+                else:
+                    self.logger.warning(f"[RELATED] Related keyword section not found for: {query}")
+
+            # with 블록 종료 시 탭이 자동으로 닫히고 드라이버는 풀로 반환됨
+            self.logger.info(f"[RELATED] Successfully scraped {len(results['result'])} keywords for: {query}")
+            return results
+            
+        except ScraperException:
+            # 이미 ScraperException인 경우 그대로 전파
+            raise
+            
+        except Exception as e:
+            error_msg = f"[RELATED] Unexpected error scraping {query}: {str(e)}"
+            self.logger.error(error_msg)
+            self.logger.error(traceback.format_exc())
+            raise ScraperException(error_msg) from e
+        
+        finally:
+            self.logger.info(f"[RELATED] Scraping completed. Result count: {len(results['result'])}")
+
+    @retry_with_exponential_backoff(
+        max_retries=3,
+        initial_delay=1.5,
+        max_delay=30.0,
+        exceptions=(ScraperException, Exception)
+    )
+    def scrape_naver_popular(self, query: str) -> Dict[str, Any]:
+        """네이버 인기주제 스크래핑 (Selenium 드라이버 풀 사용)
+        
+        드라이버를 매번 생성하지 않고 풀에서 재사용하여 속도를 대폭 개선합니다.
+        
+        Args:
+            query: 검색 키워드
+            
+        Returns:
+            {'keyword': str, 'result': [{'rank': int, 'keyword': str}, ...]}
+            
+        Raises:
+            ScraperException: 스크래핑 실패 시
+        """
+        base_url = f'https://search.naver.com/search.naver?where=nexearch&sm=top_hty&fbm=0&ie=utf8&query={quote(query)}'
+        results = {
+            'keyword': query,
+            'result': []
+        }
+        
+        try:
+            self.logger.info(f"[POPULAR] Starting Selenium scrape for keyword: {query}")
+            self.logger.info(f"[POPULAR] URL: {base_url}")
+            
+            # 드라이버 풀에서 드라이버 가져오기 (새 탭에서 실행)
+            pool = get_driver_pool()
+            
+            with pool.get_driver(base_url) as driver_wrapper:
+                driver = driver_wrapper.driver
+                
+                self.logger.info("[POPULAR] Driver obtained from pool. Page loaded.")
+                
+                # 페이지가 완전히 로드될 때까지 대기
+                time.sleep(1)
+                
+                # 인기주제도 약간 스크롤 (1회)
+                self.logger.info("[POPULAR] Scrolling to load popular keywords...")
+                try:
+                    driver_wrapper.scroll_down(nloop=1, scroll_increment=300)
+                    time.sleep(0.5)  # 스크롤 후 로딩 대기
+                except Exception as e:
+                    self.logger.warning(f"[POPULAR] Error during scroll: {e}, continuing anyway...")
+                
+                # 페이지 소스 가져오기
+                html_content = driver_wrapper.get_page_source()
+                
+                if not html_content or len(html_content) < 100:
+                    raise ScraperException("[POPULAR] Page source is empty or too short")
+                
+                soup = BeautifulSoup(html_content, 'html.parser')
+                self.logger.info("[POPULAR] Page content parsed with BeautifulSoup")
+
+                # 인기주제 키워드 추출
+                keyword_spans = soup.select('span.fds-comps-keyword-chip-text')
+                
+                if not keyword_spans:
+                    self.logger.warning(f"[POPULAR] No popular keywords found for: {query}")
+                else:
+                    rank = 1
+                    for span in keyword_spans:
+                        keyword_text = span.get_text(strip=True)
+                        if keyword_text:  # 빈 문자열 제외
+                            results['result'].append({
+                                'rank': rank,
+                                'keyword': keyword_text
+                            })
+                            rank += 1
+                            self.logger.debug(f"[POPULAR] Extracted keyword #{rank}: {keyword_text}")
+
+            # with 블록 종료 시 탭이 자동으로 닫히고 드라이버는 풀로 반환됨
+            self.logger.info(f"[POPULAR] Successfully scraped {len(results['result'])} keywords for: {query}")
+            return results
+            
+        except ScraperException:
+            # 이미 ScraperException인 경우 그대로 전파
+            raise
+            
+        except Exception as e:
+            error_msg = f"[POPULAR] Unexpected error scraping {query}: {str(e)}"
+            self.logger.error(error_msg)
+            self.logger.error(traceback.format_exc())
+            raise ScraperException(error_msg) from e
+        
+        finally:
+            self.logger.info(f"[POPULAR] Scraping completed. Result count: {len(results['result'])}")
+
+    @retry_with_exponential_backoff(
+        max_retries=3,
+        initial_delay=2.0,
+        max_delay=30.0,
+        exceptions=(ScraperException, Exception)
+    )
+    def scrape_naver_together(self, query: str) -> Dict[str, Any]:
+        """네이버 함께찾은 키워드 스크래핑 (Selenium 드라이버 풀 사용)
+        
+        드라이버를 매번 생성하지 않고 풀에서 재사용하여 속도를 대폭 개선합니다.
+        
+        Args:
+            query: 검색 키워드
+            
+        Returns:
+            {'keyword': str, 'result': [{'rank': int, 'keyword': str}, ...]}
+            
+        Raises:
+            ScraperException: 스크래핑 실패 시
+        """
+        base_url = f'https://search.naver.com/search.naver?where=nexearch&sm=top_hty&fbm=0&ie=utf8&query={quote(query)}'
+        results = {
+            'keyword': query,
+            'result': []
+        }
+        
+        try:
+            self.logger.info(f"[TOGETHER] Starting Selenium scrape for keyword: {query}")
+            self.logger.info(f"[TOGETHER] URL: {base_url}")
+            
+            # 드라이버 풀에서 드라이버 가져오기 (새 탭에서 실행)
+            pool = get_driver_pool()
+            
+            with pool.get_driver(base_url) as driver_wrapper:
+                driver = driver_wrapper.driver
+                
+                self.logger.info("[TOGETHER] Driver obtained from pool. Page loaded.")
+                
+                # 페이지가 완전히 로드될 때까지 대기
+                time.sleep(1)
+                
+                # 현재 페이지 정보 로깅
+                try:
+                    page_title = driver.title
+                    current_url = driver.current_url
+                    self.logger.info(f"[TOGETHER] Current page title: {page_title}")
+                    self.logger.info(f"[TOGETHER] Current URL: {current_url}")
+                except Exception as e:
+                    self.logger.warning(f"[TOGETHER] Could not get page info: {e}")
+                
+                # 스크롤을 통해 동적 콘텐츠 로드
+                self.logger.info("[TOGETHER] Start scrolling...")
+                try:
+                    driver_wrapper.scroll_down(nloop=3)  # 3번 스크롤
+                    time.sleep(1)  # 페이지 로딩이 완전히 끝날 때까지 대기
+                except Exception as e:
+                    self.logger.warning(f"[TOGETHER] Error during scroll: {e}, continuing anyway...")
+                
+                # 페이지 소스 가져오기
+                html_content = driver_wrapper.get_page_source()
+                
+                if not html_content or len(html_content) < 100:
+                    raise ScraperException("[TOGETHER] Page source is empty or too short")
+                
+                soup = BeautifulSoup(html_content, 'html.parser')
+                self.logger.info("[TOGETHER] Page content parsed with BeautifulSoup")
 
                 # 새로운 HTML 구조에서 키워드 추출
-                # span.sds-comps-ellipsis-content 클래스를 가진 요소에서 텍스트 추출
                 keyword_spans = soup.select('span.sds-comps-ellipsis-content')
-                self.logger.info(f"Found {len(keyword_spans)} keyword spans")
+                self.logger.info(f"[TOGETHER] Found {len(keyword_spans)} keyword spans")
+                
+                if not keyword_spans:
+                    self.logger.warning(f"[TOGETHER] No keyword spans found for: {query}")
                 
                 # 중복 제거를 위해 set 사용 후 순서 유지를 위해 list로 변환
                 seen = set()
@@ -294,23 +588,30 @@ class Scraper:
                     if keyword and keyword not in seen:
                         keywords.append(keyword)
                         seen.add(keyword)
-                        self.logger.info(f"Extracted keyword: {keyword}")
                 
+                # 결과 저장
                 rank = 0
                 for keyword in keywords:
-                    rank = rank + 1
+                    rank += 1
                     results['result'].append({
                         'rank': rank,
                         'keyword': keyword
                     })
+                    self.logger.debug(f"[TOGETHER] Extracted keyword #{rank}: {keyword}")
 
-                self.logger.info(f"Final result count: {len(results['result'])}")
-                
+            # with 블록 종료 시 탭이 자동으로 닫히고 드라이버는 풀로 반환됨
+            self.logger.info(f"[TOGETHER] Successfully scraped {len(results['result'])} keywords for: {query}")
+            return results
+            
+        except ScraperException:
+            # 이미 ScraperException인 경우 그대로 전파
+            raise
+            
         except Exception as e:
-            self.logger.error(f"Unexpected error: {e}")
+            error_msg = f"[TOGETHER] Unexpected error scraping {query}: {str(e)}"
+            self.logger.error(error_msg)
             self.logger.error(traceback.format_exc())
+            raise ScraperException(error_msg) from e
         
         finally:
-            self.logger.info(f"Scraping completed. result cnt: {len(results['result'])}")
-            
-        return results
+            self.logger.info(f"[TOGETHER] Scraping completed. Result count: {len(results['result'])}")
