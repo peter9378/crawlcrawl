@@ -1,0 +1,275 @@
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.common.exceptions import TimeoutException, WebDriverException
+from selenium.webdriver.common.by import By
+from bs4 import BeautifulSoup
+import json
+import logging
+import re
+import time
+from datetime import datetime, timezone, timedelta
+import traceback
+
+from selenium_driver import SeleniumDriver  # 개선된 selenium_driver import
+
+class Scraper:
+    def __init__(self):
+        # 로거 인스턴스 생성
+        self.logger = logging.getLogger('uvicorn')
+
+    def get_list(self, query: str, limit: int = 30):
+        base_url = 'https://www.youtube.com/results?search_query='
+        results = []
+        try:
+            with SeleniumDriver(start_url='https://www.youtube.com/') as selenium_context:
+                driver = selenium_context.driver
+                self.logger.info("Driver generated!")
+                driver.get(f'{base_url}{query}')
+
+                # 초기 스크롤 수행
+                self.scroll_down(driver, limit+1)
+                self.logger.info("Initial scroll done, start parsing")
+
+                scroll_attempt = 0
+                max_scroll_attempts = 10
+
+                while len(results) < limit:
+                    soup = BeautifulSoup(driver.page_source, 'html.parser')
+                    postfixs = soup.select('#dismissible #thumbnail')
+                    items_div = soup.find("div", id="items", class_="style-scope yt-horizontal-list-renderer")
+                    print(str(items_div))
+                    print("==========================")
+                    print(postfixs)
+                    shorts_html = str(items_div)
+                    shorts_soup = BeautifulSoup(shorts_html, "html.parser")
+
+                    for postfix in postfixs:
+                        href = postfix.get('href')
+                        if not href:
+                            continue
+
+                        url = f"https://www.youtube.com{href}"
+                        if ('watch' not in url) and ('shorts' not in url):
+                            continue
+
+                        video_id = url.split('/')[-1] if 'shorts' in url else url.split('v=')[1]
+
+                        if 'watch' in url:
+                            result = {}
+                            results.append(result)
+                            continue
+                            title, view_count, published_date, channel, description = self.get_video_detail(driver, url)
+                            result = {
+                                "VideoID": video_id,
+                                "title": title,
+                                "url": url,
+                                "videoCount": view_count,
+                                "channel": channel,
+                                "description": description,
+                                "publishedDate": published_date,
+                                "videoType": "video"
+                            }
+                        elif 'shorts' in url:
+                            meta_tag = shorts_soup.find("a", href=href)
+                            h3_tag = meta_tag.find_next("h3")
+                            meta_data = h3_tag["aria-label"]
+                            title = meta_data.split(",")[0]
+                            view_count = meta_data.split(", ")[1].split(" - ")[0].replace('조회수 ', '').replace('회', '').strip()
+
+                            published_date, channel, description = self.get_shorts_detail(driver, url)
+                            result = {
+                                "VideoID": video_id,
+                                "title": title,
+                                "url": url,
+                                "videoCount": view_count,
+                                "channel": channel,
+                                "description": description,
+                                "publishedDate": published_date,
+                                "videoType": "shorts"
+                            }
+                        else:
+                            continue
+
+                        if title is None and view_count is None and published_date is None:
+                            # 세부 정보 추출 실패 시 다음으로
+                            continue
+
+                        results.append(result)
+
+                        if len(results) >= limit:
+                            self.logger.info(f"Collected {len(results)} results. Reached limit.")
+                            break
+
+                self.logger.info(f"Final result count: {len(results)}")
+                return results
+        except Exception as e:
+            self.logger.error(f"Unexpected error: {e}")
+            self.logger.error(traceback.format_exc())
+            return results
+        finally:
+            self.logger.info(f"Scraping completed. Result count: {len(results)}")
+
+    def get_video_detail(self, driver, url: str):
+        try:
+            self.logger.info(f"Fetching video details for URL: {url}")
+            driver.get(url)
+            wait = WebDriverWait(driver, 10)
+            wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "div#microformat")))
+
+            soup = BeautifulSoup(driver.page_source, 'html.parser')
+            soup_tag = script_tag = soup.find("div", {"id": "microformat"}).find("script", {"type": "application/ld+json"})
+            data = json.loads(soup_tag.string)
+
+            # 제목 추출
+            title = data.get("name")
+
+            # 조회수
+            view_count_number = data.get("interactionCount")
+
+            # 업로드 날짜
+            published_date = self.to_kst(data.get("uploadDate"))
+
+            channel = data.get("author")
+
+            description = data.get("description")
+
+            return title, view_count_number, published_date, channel, description
+        except TimeoutException:
+            self.logger.warning(f"Timeout fetching video details for URL: {url}")
+            return None, None, None
+        except Exception as e:
+            self.logger.error(f"Error extracting video details: {e}")
+            self.logger.error(traceback.format_exc())
+            return None, None, None
+
+    def get_shorts_detail(self, driver, url: str):
+        try:
+            self.logger.info(f"Fetching shorts details for URL: {url}")
+            driver.get(url)
+            WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.ID, 'menu-button')))
+            soup = BeautifulSoup(driver.page_source, 'html.parser')
+
+            channel_element = soup.find('link', itemprop="name")
+            channel = channel_element['content'] if channel_element and 'content' in channel_element.attrs else None
+            print(channel)
+
+            description_element = soup.find('meta', itemprop="description")
+            description = description_element['content'] if description_element and 'content' in description_element.attrs else None
+            print(description)
+
+            factoids = soup.find_all('factoid-renderer', class_='ytwFactoidRendererHost')
+
+            view_count = None
+            published_date = None
+
+            for factoid in factoids:
+                div = factoid.find('div', class_='ytwFactoidRendererFactoid')
+                aria_label = div.get('aria-label', '')
+                if 'views' in aria_label:
+                    view_count = aria_label.replace(' views', '').replace(',', '').strip()
+                elif '조회수' in aria_label:
+                    view_count = aria_label.replace('조회수 ', '').replace('회', '').strip()
+                else:
+                    published_date = self.convert_date(aria_label)
+
+            return published_date, channel, description
+        except TimeoutException:
+            self.logger.warning(f"Timeout fetching shorts details for URL: {url}")
+            return None, None, None
+        except Exception as e:
+            self.logger.error(f"Error extracting shorts details: {e}")
+            self.logger.error(traceback.format_exc())
+            return None, None, None
+
+            #title_element = soup.find('yt-formatted-string', class_='style-scope ytd-video-description-header-renderer')
+            #title = title_element.text.strip() if title_element else None
+
+            #factoids = soup.find_all('factoid-renderer', class_='YtwFactoidRendererHost')
+
+            #view_count = None
+            #published_date = None
+
+            #for factoid in factoids:
+            #    div = factoid.find('div', class_='YtwFactoidRendererFactoid')
+            #    aria_label = div.get('aria-label', '')
+            #    if 'views' in aria_label:
+            #        view_count = aria_label.replace(' views', '').replace(',', '').strip()
+            #    else:
+            #        published_date = self.convert_date(aria_label)
+            #channel = ""
+            #description = ""
+#
+            return title, view_count, published_date, channel, description
+        except TimeoutException:
+            self.logger.warning(f"Timeout fetching shorts details for URL: {url}")
+            return None, None, None
+        except Exception as e:
+            self.logger.error(f"Error extracting shorts details: {e}")
+            self.logger.error(traceback.format_exc())
+            return None, None, None
+
+    def to_kst(self, timestamp: str):
+        dt = datetime.fromisoformat(timestamp)
+        kst = timezone(timedelta(hours=9))
+        dt_kst = dt.astimezone(kst)
+        return dt_kst.isoformat()
+
+
+    def scroll_down(self, driver, nloop: int = 1):
+        try:
+            scroll_increment = 280
+            for i in range(nloop):
+                driver.execute_script(f"window.scrollBy(0, {scroll_increment});")
+                time.sleep(1)  # 페이지 로딩 대기
+                self.logger.info(f"Scrolled down by {scroll_increment} pixels")
+        except WebDriverException as e:
+            self.logger.error(f"Error during scroll: {e}")
+            self.logger.error(traceback.format_exc())
+
+    def convert_date(self, input_str: str):
+        if not input_str:
+            return None
+        try:
+            date_pattern = r'(?:Streamed live on |Premiered )?(\w{3}) (\d{1,2}), (\d{4})'
+            hours_ago_pattern = r'Streamed live (\d+) hours ago'
+            korean_date_pattern = r'(\d{4})\. (\d{1,2})\. (\d{1,2})\.'
+            premiered_korean_pattern = r'최초 공개: (\d{4})\. (\d{1,2})\. (\d{1,2})\.'
+            minutes_ago_pattern = r'(\d+)분 전 최초 공개'
+
+            match = re.search(date_pattern, input_str)
+            if match:
+                month_str, day, year = match.groups()
+                date_obj = datetime.strptime(f'{month_str} {day} {year}', '%b %d %Y')
+                return date_obj.strftime('%Y-%m-%d')
+
+            match = re.search(hours_ago_pattern, input_str)
+            if match:
+                hours_ago = int(match.group(1))
+                date_obj = datetime.now() - timedelta(hours=hours_ago)
+                return date_obj.strftime('%Y-%m-%d')
+
+            match = re.search(korean_date_pattern, input_str)
+            if match:
+                year, month, day = match.groups()
+                date_obj = datetime.strptime(f'{year}-{month}-{day}', '%Y-%m-%d')
+                return date_obj.strftime('%Y-%m-%d')
+
+            match = re.search(premiered_korean_pattern, input_str)
+            if match:
+                year, month, day = match.groups()
+                date_obj = datetime.strptime(f'{year}-{month}-{day}', '%Y-%m-%d')
+                return date_obj.strftime('%Y-%m-%d')
+
+            match = re.search(minutes_ago_pattern, input_str)
+            if match:
+                minutes_ago = int(match.group(1))
+                date_obj = datetime.now() - timedelta(minutes=minutes_ago)
+                return date_obj.strftime('%Y-%m-%d')
+
+            # 패턴 매칭 안될 경우 기본값
+            return "9999-09-09"
+        except ValueError as e:
+            self.logger.error(f"Error converting date: {e}")
+            self.logger.error(traceback.format_exc())
+            return None
+

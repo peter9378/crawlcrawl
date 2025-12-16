@@ -1,0 +1,40 @@
+INFO:uvicorn:[YOUTUBE] Starting search flow for: 속건조
+INFO:uvicorn:[POOL] Selenium driver pool initialized
+INFO:uvicorn:[POOL] thread-8457011776: No driver found, creating new one
+INFO:uvicorn:[POOL] thread-8457011776: Creating new driver (attempt 1/3)
+INFO:uvicorn:[SELENIUM] Initializing Chrome driver...
+INFO:uvicorn:[SELENIUM] Loading page: https://www.youtube.com/
+INFO:uvicorn:[SELENIUM] Driver initialized successfully
+INFO:uvicorn:[POOL] thread-8457011776: Driver created successfully
+INFO:uvicorn:[POOL] thread-8457011776: Using driver (use_count: 1/100, restart in 99 requests)
+INFO:uvicorn:[POOL] thread-8457011776: Loading URL in new tab: https://www.youtube.com
+INFO:uvicorn:[YOUTUBE] Found home search input
+INFO:uvicorn:[YOUTUBE] Entered query '속건조' and pressed ENTER
+INFO:uvicorn:[YOUTUBE] Current URL after search: https://www.youtube.com/results?search_query=%EC%86%8D%EA%B1%B4%EC%A1%B0
+INFO:uvicorn:[YOUTUBE] Clicked results page search input
+INFO:uvicorn:[YOUTUBE] List A (Focus): ['속당김 스킨케어', '속건조 앰플', '속건조 토너', '속건조 미스트', '속건조 시술', '속건조 스킨케어 올리브영', '속건조 추천템']
+INFO:uvicorn:[YOUTUBE] List B (Space): ['속건조 스킨케어', '속건조 해결', '속건조 앰플', '속건조 토너', '속건조 잡는법', '속건조 크림', '속건조 수분크림', '속건조 세럼', '속건조 쿠션', '속건조 시술', '속건조 미스트', '속건조 토너 추천', '속건조 로션', '속건조 앰플 추천']
+INFO:uvicorn:[YOUTUBE] Final Combined Unique: ['속건조 스킨케어', '속건조 해결', '속건조 앰플', '속건조 토너', '속건조 잡는법', '속건조 크림', '속건조 수분크림', '속건조 세럼', '속건조 쿠션', '속건조 시술', '속건조 미스트', '속건조 토너 추천', '속건조 로션', '속건조 앰플 추천', '속당김 스킨케어', '속건조 스킨케어 올리브영', '속건조 추천템']
+Testing get_suggestions for query: '속건조'
+
+==================================================
+Final Suggestions Count: 17
+==================================================
+1. 속건조 스킨케어
+2. 속건조 해결
+3. 속건조 앰플
+4. 속건조 토너
+5. 속건조 잡는법
+6. 속건조 크림
+7. 속건조 수분크림
+8. 속건조 세럼
+9. 속건조 쿠션
+10. 속건조 시술
+11. 속건조 미스트
+12. 속건조 토너 추천
+13. 속건조 로션
+14. 속건조 앰플 추천
+15. 속당김 스킨케어
+16. 속건조 스킨케어 올리브영
+17. 속건조 추천템
+==================================================

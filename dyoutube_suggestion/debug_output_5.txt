@@ -1,0 +1,21 @@
+INFO:uvicorn:[YOUTUBE] Getting suggestions for: 속건조
+INFO:uvicorn:[POOL] Selenium driver pool initialized
+INFO:uvicorn:[POOL] thread-8457011776: No driver found, creating new one
+INFO:uvicorn:[POOL] thread-8457011776: Creating new driver (attempt 1/3)
+INFO:uvicorn:[SELENIUM] Initializing Chrome driver...
+INFO:uvicorn:[SELENIUM] Loading page: https://www.youtube.com/
+INFO:uvicorn:[SELENIUM] Driver initialized successfully
+INFO:uvicorn:[POOL] thread-8457011776: Driver created successfully
+INFO:uvicorn:[POOL] thread-8457011776: Using driver (use_count: 1/100, restart in 99 requests)
+INFO:uvicorn:[POOL] thread-8457011776: Loading URL in new tab: https://www.youtube.com/results?search_query=속건조
+INFO:uvicorn:[YOUTUBE] Active Element: BUTTON.style-scope yt-icon-button
+INFO:uvicorn:[YOUTUBE] Suggestion Elements Count: 0
+INFO:uvicorn:[YOUTUBE] List A (Focus): []
+INFO:uvicorn:[YOUTUBE] List B (Space): []
+INFO:uvicorn:[YOUTUBE] Final Combined Unique: []
+Testing get_suggestions for query: '속건조'
+
+==================================================
+Final Suggestions Count: 0
+==================================================
+==================================================
