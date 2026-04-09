@@ -25,8 +25,9 @@ class Scraper:
         
         try:
             with SeleniumDriver(start_url=url).driver as driver:
+                # gl=us를 붙여서 미국검색을 한다.
                 base_url = 'https://www.google.com/search?q='
-                driver.get(f'{base_url}{query}')
+                driver.get(f'{base_url}{query}&gl=us')
                 self.scroll_down(driver, 1)
                 print("start crawling google")
 

@@ -31,7 +31,8 @@ class Scraper:
         최대 limit개의 동영상 정보를 리스트 형태로 반환.
         드라이버 풀을 사용하여 성능을 개선합니다.
         """
-        base_url = f"https://www.youtube.com/results?search_query={query}"
+        # gl=us를 붙여서 미국검색을 한다.
+        base_url = f"https://www.youtube.com/results?search_query={query}&gl=us"
         results = []
 
         try:
