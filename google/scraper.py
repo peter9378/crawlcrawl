@@ -215,7 +215,7 @@ class Scraper:
                     text = a.get_text(separator=' ', strip=True)
                     if text and len(text) > 1 and text not in seen:
                         seen.add(text)
-                        results.append({"searchType": "pc", "relatedKeyword": text})
+                        results.append({"rank": len(results) + 1, "keyword": text})
 
             # Fallback: 'Related searches' 섹션 파싱
             if not results:
@@ -235,9 +235,9 @@ class Scraper:
                                 text = a.get_text(separator=' ', strip=True)
                                 if text and text not in seen and query.lower() != text.lower():
                                     seen.add(text)
-                                    results.append({"searchType": "pc", "relatedKeyword": text})
+                                    results.append({"rank": len(results) + 1, "keyword": text})
 
-            results = [r for r in results if "click here" not in r["relatedKeyword"].lower()]
+            results = [r for r in results if "click here" not in r["keyword"].lower()]
             results = results[:limit]
 
         except Exception as e:
