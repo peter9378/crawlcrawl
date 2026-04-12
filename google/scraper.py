@@ -10,6 +10,8 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException, WebDriverException
 from selenium.webdriver.common.by import By
+from selenium.webdriver.common.keys import Keys
+from selenium.webdriver.common.action_chains import ActionChains
 import urllib.parse
 import traceback
 import time
@@ -186,14 +188,28 @@ class Scraper:
 
             driver = self._create_driver()
             
-            # 홈페이지를 먼저 방문하고 쿠키를 세팅하여 실제 유저와 유사하게 동작하도록 유도
+            # 홈페이지를 먼저 방문하여 유저 이벤트를 생성 (직접 URL 접속 시 bot 탐지 확률 높음)
+            home_url = "https://www.google.com/?gl=us&hl=en"
+            driver.get(home_url)
+            time.sleep(random.uniform(1.0, 2.5))
+            
             try:
-                driver.get("https://www.google.com/")
-                time.sleep(random.uniform(0.3, 1.2))
-            except Exception:
-                pass
-
-            driver.get(search_url)
+                # 검색창 요소 찾기 (보통 name="q"인 textarea 혹은 input)
+                search_box = WebDriverWait(driver, 5).until(
+                    EC.element_to_be_clickable((By.NAME, "q"))
+                )
+                # 실제 유저처럼 클릭 후 타이핑하여 검색 수행
+                actions = ActionChains(driver)
+                actions.move_to_element(search_box).click().pause(0.5).send_keys(query).pause(0.5).send_keys(Keys.RETURN).perform()
+                self.logger.info("Successfully typed the query and pressed ENTER on homepage.")
+                
+                # 결과 페이지 전환 대기
+                time.sleep(random.uniform(2.0, 3.5))
+                
+            except Exception as e:
+                self.logger.warning(f"Failed to use type-and-search: {e}. Falling back to direct URL.")
+                driver.get(search_url)
+                time.sleep(random.uniform(1.0, 2.0))
 
             # 스크롤로 lazy-load 트리거
             self._scroll_down(driver, nloop=3)
