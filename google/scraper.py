@@ -1,10 +1,12 @@
 from bs4 import BeautifulSoup
 import logging
+import json
 import os
 import re
 import sys
 from typing import Optional
 import subprocess
+import requests
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 import urllib.parse
 import traceback
@@ -12,21 +14,19 @@ import time
 import random
 
 
-# ── 스텔스 스크립트 ──────────────────────────────────────────────────────────
-# playwright는 기본적으로 navigator.webdriver를 노출하지 않지만,
-# 추가적인 fingerprint 탐지 포인트를 모두 차단한다.
-_STEALTH_JS = """
-// Chrome 런타임 스푸핑
-if (!window.chrome) {
-  window.chrome = {
-    runtime: {},
-    loadTimes: function() {},
-    csi: function() {},
-    app: {},
-  };
-}
+_USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36",
+]
 
-// 플러그인 스푸핑 (빈 배열은 봇 시그널)
+# playwright 사용 시 stealth 스크립트
+_STEALTH_JS = """
+if (!window.chrome) {
+  window.chrome = { runtime: {}, loadTimes: function(){}, csi: function(){}, app: {} };
+}
 try {
   Object.defineProperty(navigator, 'plugins', {
     get: () => {
@@ -40,20 +40,12 @@ try {
     }
   });
 } catch(e) {}
-
-// 언어 스푸핑
 Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
-
-// Permissions API 패치
 try {
   const _orig = window.navigator.permissions.query.bind(window.navigator.permissions);
   window.navigator.permissions.query = (p) =>
-    p.name === 'notifications'
-      ? Promise.resolve({ state: Notification.permission })
-      : _orig(p);
+    p.name === 'notifications' ? Promise.resolve({ state: Notification.permission }) : _orig(p);
 } catch(e) {}
-
-// WebGL 렌더러 스푸핑 (headless 탐지 방지)
 try {
   const _get = WebGLRenderingContext.prototype.getParameter;
   WebGLRenderingContext.prototype.getParameter = function(p) {
@@ -62,19 +54,8 @@ try {
     return _get.call(this, p);
   };
 } catch(e) {}
-
-// 화면 색심도 스푸핑
-try { Object.defineProperty(screen, 'colorDepth', { get: () => 24 }); } catch(e) {}
 """
 
-_USER_AGENTS = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36",
-]
-
-# 미국 주요 도시 timezone/geolocation 풀
 _LOCALES = [
     {"timezone": "America/New_York",    "geo": {"longitude": -74.006,  "latitude": 40.713}},
     {"timezone": "America/Chicago",     "geo": {"longitude": -87.629,  "latitude": 41.878}},
@@ -95,7 +76,70 @@ class Scraper:
         self.logger = logging.getLogger('uvicorn')
 
     # ------------------------------------------------------------------ #
-    #  Xvfb 가상 디스플레이 (Linux 전용)                                    #
+    #  Primary: Google Autocomplete API (HTTP only, no browser, no CAPTCHA)
+    # ------------------------------------------------------------------ #
+
+    def _scrape_via_autocomplete(self, query: str, limit: int) -> list:
+        """
+        Google의 공개 Autocomplete API를 사용.
+        브라우저 없이 일반 HTTP 요청으로 동작하므로 GCP IP에서도 CAPTCHA 없이 사용 가능.
+        엔드포인트 1: suggestqueries (안정적, 범용)
+        엔드포인트 2: gws-wiz (더 많은 제안, 파싱 필요)
+        """
+        encoded_query = urllib.parse.quote(query)
+        ua = random.choice(_USER_AGENTS)
+        headers = {
+            "User-Agent": ua,
+            "Accept": "application/json, text/javascript, */*; q=0.01",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Referer": "https://www.google.com/",
+        }
+
+        # 엔드포인트 1: suggestqueries (Firefox client — JSON 배열 반환)
+        url1 = (
+            f"https://suggestqueries.google.com/complete/search"
+            f"?client=firefox&q={encoded_query}&hl=en&gl=us"
+        )
+        try:
+            resp = requests.get(url1, headers=headers, timeout=10)
+            resp.raise_for_status()
+            data = json.loads(resp.text)
+            # 형식: ["query", ["sug1", "sug2", ...], ...]
+            suggestions = data[1] if len(data) > 1 else []
+            if suggestions:
+                results = [
+                    {"rank": i + 1, "keyword": s}
+                    for i, s in enumerate(suggestions[:limit])
+                ]
+                self.logger.info(f"[autocomplete/suggestqueries] got {len(results)} results")
+                return results
+        except Exception as e:
+            self.logger.warning(f"[autocomplete/suggestqueries] failed: {e}")
+
+        # 엔드포인트 2: chrome-omni (JSON 배열 반환, 더 다양한 제안)
+        url2 = (
+            f"https://suggestqueries.google.com/complete/search"
+            f"?client=chrome&q={encoded_query}&hl=en&gl=us"
+        )
+        try:
+            resp = requests.get(url2, headers=headers, timeout=10)
+            resp.raise_for_status()
+            data = json.loads(resp.text)
+            suggestions = data[1] if len(data) > 1 else []
+            if suggestions:
+                results = [
+                    {"rank": i + 1, "keyword": s}
+                    for i, s in enumerate(suggestions[:limit])
+                ]
+                self.logger.info(f"[autocomplete/chrome] got {len(results)} results")
+                return results
+        except Exception as e:
+            self.logger.warning(f"[autocomplete/chrome] failed: {e}")
+
+        return []
+
+    # ------------------------------------------------------------------ #
+    #  Fallback: playwright 브라우저 (Autocomplete 실패 시)                 #
     # ------------------------------------------------------------------ #
 
     @staticmethod
@@ -115,12 +159,22 @@ class Scraper:
         except FileNotFoundError:
             return None
 
-    # ------------------------------------------------------------------ #
-    #  자연스러운 사용자 행동                                                #
-    # ------------------------------------------------------------------ #
+    def _find_chrome(self) -> Optional[str]:
+        for path in self._CHROME_PATHS:
+            if os.path.isfile(path):
+                return path
+        for cmd in ("google-chrome", "google-chrome-stable", "chromium", "chromium-browser"):
+            try:
+                path = subprocess.check_output(
+                    ["which", cmd], stderr=subprocess.DEVNULL, timeout=3
+                ).decode().strip()
+                if path and os.path.isfile(path):
+                    return path
+            except Exception:
+                pass
+        return None
 
     def _human_type(self, page, selector: str, text: str):
-        """실제 사람처럼 한 글자씩 랜덤 딜레이를 두고 타이핑."""
         page.click(selector)
         time.sleep(random.uniform(0.2, 0.5))
         for char in text:
@@ -128,7 +182,6 @@ class Scraper:
             time.sleep(random.uniform(0.04, 0.16))
 
     def _move_mouse_randomly(self, page):
-        """페이지 내 여러 위치로 마우스를 자연스럽게 이동."""
         try:
             vp = page.viewport_size or {"width": 1920, "height": 1080}
             for _ in range(random.randint(3, 6)):
@@ -139,27 +192,21 @@ class Scraper:
         except Exception:
             pass
 
-    # ------------------------------------------------------------------ #
-    #  메인 스크래핑                                                         #
-    # ------------------------------------------------------------------ #
-
-    def scrape_google(self, query: str, limit: int = 30):
+    def _scrape_via_browser(self, query: str, limit: int) -> list:
+        """playwright 브라우저를 통한 Google 검색 결과 #bres 파싱."""
         encoded_query = urllib.parse.quote(query)
         search_url = f"https://www.google.com/search?q={encoded_query}&gl=us&hl=en"
         results = []
         xvfb_proc = None
 
         try:
-            print(f"start crawling google with playwright for query: {query}")
-
-            # Linux 서버: Xvfb 가상 디스플레이 위에서 headless=False 실행
             headless = True
             if self._is_linux():
                 xvfb_proc = self._start_xvfb()
                 if xvfb_proc:
                     os.environ["DISPLAY"] = ":99"
                     headless = False
-                    print("[pw] Xvfb virtual display started on :99")
+                    print("[pw] Xvfb started on :99")
                 else:
                     print("[pw] Xvfb not found, running headless")
 
@@ -168,10 +215,7 @@ class Scraper:
             width = random.randint(1800, 1920)
             height = random.randint(900, 1080)
 
-            print(f"[pw] headless={headless}, ua={ua[:40]}..., timezone={locale_cfg['timezone']}")
-
             with sync_playwright() as pw:
-                # 설치된 Chrome 우선 사용, 없으면 playwright 번들 Chromium 사용
                 chrome_path = self._find_chrome()
                 launch_kwargs = dict(
                     headless=headless,
@@ -192,10 +236,8 @@ class Scraper:
                 )
                 if chrome_path:
                     launch_kwargs["executable_path"] = chrome_path
-                    print(f"[pw] Using Chrome: {chrome_path}")
 
                 browser = pw.chromium.launch(**launch_kwargs)
-
                 context = browser.new_context(
                     viewport={"width": width, "height": height},
                     user_agent=ua,
@@ -203,67 +245,52 @@ class Scraper:
                     timezone_id=locale_cfg["timezone"],
                     geolocation=locale_cfg["geo"],
                     permissions=["geolocation"],
-                    # Accept-Language 헤더 강제 설정
                     extra_http_headers={
                         "Accept-Language": "en-US,en;q=0.9",
                         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
                     },
                 )
-
-                # 모든 페이지에 스텔스 스크립트 주입
                 context.add_init_script(_STEALTH_JS)
-
                 page = context.new_page()
 
-                # 구글 홈 방문
-                home_url = "https://www.google.com/?gl=us&hl=en"
-                page.goto(home_url, wait_until="domcontentloaded", timeout=30000)
+                page.goto("https://www.google.com/?gl=us&hl=en", wait_until="domcontentloaded", timeout=30000)
                 time.sleep(random.uniform(1.5, 2.5))
-
-                # 자연스러운 마우스 이동
                 self._move_mouse_randomly(page)
                 time.sleep(random.uniform(0.5, 1.0))
 
                 try:
-                    # 검색창 클릭 후 자연스러운 타이핑
                     page.wait_for_selector('textarea[name="q"], input[name="q"]', timeout=8000)
-                    search_selector = 'textarea[name="q"]' if page.query_selector('textarea[name="q"]') else 'input[name="q"]'
-
+                    search_selector = (
+                        'textarea[name="q"]'
+                        if page.query_selector('textarea[name="q"]')
+                        else 'input[name="q"]'
+                    )
                     self._human_type(page, search_selector, query)
                     time.sleep(random.uniform(0.4, 0.8))
                     page.keyboard.press("Enter")
-                    self.logger.info("Typed query and pressed Enter.")
-
                     page.wait_for_load_state("domcontentloaded", timeout=15000)
                     time.sleep(random.uniform(2.0, 3.0))
-
                 except Exception as e:
-                    self.logger.warning(f"Homepage search failed: {e}. Falling back to direct URL.")
+                    self.logger.warning(f"[browser] search input failed: {e}. Using direct URL.")
                     page.goto(search_url, wait_until="domcontentloaded", timeout=30000)
                     time.sleep(random.uniform(2.0, 3.0))
 
-                # CAPTCHA 탐지
-                current_url = page.url
-                if '/sorry/' in current_url:
-                    self.logger.error(f"Google CAPTCHA detected! current_url={current_url}")
+                if '/sorry/' in page.url:
+                    self.logger.error(f"[browser] CAPTCHA detected: {page.url}")
                     context.close()
                     browser.close()
                     return results
 
-                # 스크롤로 lazy-load 트리거
                 self._scroll_down(page, nloop=3)
 
-                # #bres 대기
                 try:
                     page.wait_for_selector("#bres", timeout=10000)
                     time.sleep(0.5)
                 except PlaywrightTimeoutError:
-                    self.logger.warning("Timeout waiting for #bres, using current DOM.")
+                    self.logger.warning("[browser] #bres timeout, using current DOM.")
 
-                # CAPTCHA 재확인
-                current_url = page.url
-                if '/sorry/' in current_url:
-                    self.logger.error(f"Google CAPTCHA detected! current_url={current_url}")
+                if '/sorry/' in page.url:
+                    self.logger.error(f"[browser] CAPTCHA detected: {page.url}")
                     context.close()
                     browser.close()
                     return results
@@ -283,14 +310,13 @@ class Scraper:
                         seen.add(text)
                         results.append({"rank": len(results) + 1, "keyword": text})
 
-            # Fallback: 'Related searches' 섹션 파싱
             if not results:
-                headers = soup.find_all(
+                headers_found = soup.find_all(
                     string=lambda t: t and (
                         'Related searches' in t or 'People also search for' in t
                     )
                 )
-                for h in headers:
+                for h in headers_found:
                     container = h.parent.find_parent()
                     while container and container.name != 'div':
                         container = container.parent
@@ -307,19 +333,13 @@ class Scraper:
             results = results[:limit]
 
         except Exception as e:
-            self.logger.error(f'Unexpected error occurred: {str(e)}')
+            self.logger.error(f'[browser] Unexpected error: {str(e)}')
             self.logger.error(traceback.format_exc())
-
         finally:
             if xvfb_proc:
                 xvfb_proc.terminate()
-            self.logger.info(f"Scraping completed. Total results: {len(results)}")
 
         return results
-
-    # ------------------------------------------------------------------ #
-    #  스크롤                                                               #
-    # ------------------------------------------------------------------ #
 
     def _scroll_down(self, page, nloop: int = 1):
         scroll_position = 0
@@ -328,31 +348,30 @@ class Scraper:
                 scroll_position += random.randint(800, 1500)
                 page.evaluate(f"window.scrollTo(0, {scroll_position})")
                 time.sleep(random.uniform(0.3, 0.7))
-                self.logger.info(f"Scrolled to position: {scroll_position}")
         except Exception as e:
-            self.logger.error(f"Error during scroll: {e}")
+            self.logger.error(f"[scroll] {e}")
 
     # ------------------------------------------------------------------ #
-    #  Chrome 경로 탐색                                                     #
+    #  Public API                                                          #
     # ------------------------------------------------------------------ #
 
-    def _find_chrome(self) -> Optional[str]:
-        for path in self._CHROME_PATHS:
-            if os.path.isfile(path):
-                return path
-        for cmd in ("google-chrome", "google-chrome-stable", "chromium", "chromium-browser"):
-            try:
-                path = subprocess.check_output(
-                    ["which", cmd], stderr=subprocess.DEVNULL, timeout=3
-                ).decode().strip()
-                if path and os.path.isfile(path):
-                    return path
-            except Exception:
-                pass
-        return None
+    def scrape_google(self, query: str, limit: int = 30) -> list:
+        print(f"[scraper] query={query}, limit={limit}")
+
+        # 1차: Autocomplete API (브라우저 불필요, CAPTCHA 없음)
+        results = self._scrape_via_autocomplete(query, limit)
+        if results:
+            self.logger.info(f"[scraper] autocomplete success: {len(results)} results")
+            return results
+
+        # 2차: playwright 브라우저 (Autocomplete 실패 시 폴백)
+        self.logger.warning("[scraper] autocomplete returned empty, falling back to browser")
+        results = self._scrape_via_browser(query, limit)
+        self.logger.info(f"[scraper] browser fallback: {len(results)} results")
+        return results
 
 
 if __name__ == '__main__':
     scraper = Scraper()
-    result = scraper.scrape_google('hello')
+    result = scraper.scrape_google('coupang')
     print(result)

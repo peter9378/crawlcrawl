@@ -1,5 +1,4 @@
 from fastapi import FastAPI, HTTPException
-from driver_manager import DriverManager
 from scraper import Scraper
 import re
 from urllib.parse import unquote
