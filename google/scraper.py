@@ -13,6 +13,7 @@ from selenium.webdriver.common.by import By
 import urllib.parse
 import traceback
 import time
+import random
 
 
 class Scraper:
@@ -83,7 +84,12 @@ class Scraper:
 
     def _create_driver(self) -> uc.Chrome:
         options = uc.ChromeOptions()
-        options.add_argument('--window-size=1920,1080')
+        
+        # 1. 윈도우 사이즈 무작위화
+        width = random.randint(1800, 1920)
+        height = random.randint(900, 1080)
+        options.add_argument(f'--window-size={width},{height}')
+        
         options.add_argument('--no-sandbox')
         options.add_argument('--disable-dev-shm-usage')
         options.add_argument('--disable-gpu')
@@ -96,12 +102,8 @@ class Scraper:
         # GCP 환경에서 DISPLAY 가 없을 때 렌더링 오류 방지
         options.add_argument('--disable-software-rasterizer')
         options.add_argument('--disable-extensions')
-        # 실제 사용자처럼 보이는 User-Agent
-        options.add_argument(
-            '--user-agent=Mozilla/5.0 (X11; Linux x86_64) '
-            'AppleWebKit/537.36 (KHTML, like Gecko) '
-            'Chrome/135.0.0.0 Safari/537.36'
-        )
+        # User-Agent 설정 제거: undetected-chromedriver가 내부적으로 
+        # 브라우저의 실제 UA 및 sec-ch-ua 헤더를 유지하도록 하여 구글 봇 탐지 우회
         prefs = {
             "profile.managed_default_content_settings.images": 2,
             "profile.default_content_setting_values.notifications": 2,
@@ -183,10 +185,18 @@ class Scraper:
                     print("[uc] Xvfb not found, falling back to --headless=new")
 
             driver = self._create_driver()
+            
+            # 홈페이지를 먼저 방문하고 쿠키를 세팅하여 실제 유저와 유사하게 동작하도록 유도
+            try:
+                driver.get("https://www.google.com/")
+                time.sleep(random.uniform(0.3, 1.2))
+            except Exception:
+                pass
+
             driver.get(search_url)
 
             # 스크롤로 lazy-load 트리거
-            self._scroll_down(driver, nloop=10)
+            self._scroll_down(driver, nloop=3)
 
             # #bres (관련 검색어 컨테이너) 대기
             try:
@@ -264,9 +274,10 @@ class Scraper:
         scroll_position = 0
         try:
             for _ in range(nloop):
-                scroll_position += 700
+                # 스크롤 양과 대기 시간을 무작위로 설정
+                scroll_position += random.randint(1000, 2000)
                 driver.execute_script(f"window.scrollTo(0, {scroll_position})")
-                time.sleep(0.5)
+                time.sleep(random.uniform(0.1, 0.6))
                 self.logger.info(f"Scrolled down to position: {scroll_position}")
         except WebDriverException as e:
             self.logger.error(f"Error during scroll: {e}")
