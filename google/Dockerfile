@@ -45,8 +45,10 @@ COPY . .
 
 RUN pip3 install --upgrade pip && \
     pip3 install --no-cache-dir -r requirements.txt && \
-    # playwright 브라우저 드라이버 설치 (Google Chrome 폴백용 Chromium 포함)
-    playwright install --with-deps chromium
+    # playwright 브라우저 드라이버 설치
+    # --with-deps 는 apt-get 기반 Ubuntu만 지원하므로 Rocky Linux(dnf)에서는 사용 불가.
+    # Chrome 의존 라이브러리는 위 dnf install 단계에서 이미 설치됨.
+    playwright install chromium
 
 # ── 실행 ───────────────────────────────────────────────────────────────────
 CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "80"]
