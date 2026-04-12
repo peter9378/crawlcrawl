@@ -44,7 +44,9 @@ WORKDIR /app
 COPY . .
 
 RUN pip3 install --upgrade pip && \
-    pip3 install --no-cache-dir -r requirements.txt
+    pip3 install --no-cache-dir -r requirements.txt && \
+    # playwright 브라우저 드라이버 설치 (Google Chrome 폴백용 Chromium 포함)
+    playwright install --with-deps chromium
 
 # ── 실행 ───────────────────────────────────────────────────────────────────
 CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "80"]
