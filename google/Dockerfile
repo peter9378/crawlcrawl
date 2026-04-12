@@ -1,45 +1,50 @@
-FROM python:3.8-slim
+# GCP Rocky Linux 환경 (RHEL-compatible)
+FROM rockylinux:9
 
-RUN apt-get update && apt-get install -yqq \
-    wget \
-    build-essential \
-    python3-dev \
-    fonts-liberation \
-    libasound2 \
-    libatk-bridge2.0-0 \
-    libatk1.0-0 \
-    libatspi2.0-0 \
-    libcups2 \
-    libdbus-1-3 \
-    libdrm2 \
-    libgbm1 \
-    libgtk-3-0 \
-    libnspr4 \
-    libnss3 \
-    libu2f-udev \
-    libvulkan1 \
-    libxcomposite1 \
-    libxdamage1 \
-    libxfixes3 \
-    libxkbcommon0 \
-    libxrandr2 \
-    xdg-utils \
-    libcurl3-gnutls \
-    libcurl3-nss \
-    libcurl4 && \
-    wget https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb && \
-    dpkg -i google-chrome-stable_current_amd64.deb && \
-    rm google-chrome-stable_current_amd64.deb && \
-    apt-get clean && rm -rf /var/lib/apt/lists/*
+# ── 시스템 패키지 ──────────────────────────────────────────────────────────
+RUN dnf install -y epel-release && \
+    dnf install -y \
+        python3 \
+        python3-pip \
+        wget \
+        unzip \
+        # Xvfb — 가상 디스플레이 (headless 없이 Chrome 실행)
+        xorg-x11-server-Xvfb \
+        # Chrome 의존 라이브러리
+        alsa-lib \
+        atk \
+        at-spi2-atk \
+        cups-libs \
+        dbus-libs \
+        gtk3 \
+        libdrm \
+        libgbm \
+        libX11 \
+        libXcomposite \
+        libXdamage \
+        libXext \
+        libXfixes \
+        libXrandr \
+        libxkbcommon \
+        mesa-libgbm \
+        nss \
+        nspr \
+        pango \
+        xdg-utils \
+    && dnf clean all
 
+# ── Google Chrome 안정 버전 설치 ───────────────────────────────────────────
+RUN wget -q https://dl.google.com/linux/direct/google-chrome-stable_current_x86_64.rpm \
+        -O /tmp/chrome.rpm && \
+    dnf install -y /tmp/chrome.rpm && \
+    rm /tmp/chrome.rpm
+
+# ── Python 앱 설치 ─────────────────────────────────────────────────────────
 WORKDIR /app
-
 COPY . .
 
-RUN pip install --upgrade pip && \
-    pip install --no-cache-dir -r requirements.txt && \
-    pip install --no-cache-dir beautifulsoup4
+RUN pip3 install --upgrade pip && \
+    pip3 install --no-cache-dir -r requirements.txt
 
+# ── 실행 ───────────────────────────────────────────────────────────────────
 CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "80"]
-
-
