@@ -39,12 +39,9 @@ def shopping_related(keyword: str):
 async def youtube(keywords: str, limit: int, retry_count: int = 0):
     global current_server_index
 
-    SSH_USER = 'root'       # Replace with your SSH username
+    SSH_USER = 'loopit0423'       # Replace with your SSH username
     SERVERS = [
-        {'host': '27.96.135.171', 'port': 1234},
-        {'host': '118.67.129.181', 'port': 1234},
-        {'host': '118.67.135.127', 'port': 1234},
-        {'host': '101.101.218.102', 'port': 1234}
+        {'host': '10.128.0.4', 'port': 1234}
     ]
 
     # 재시도가 아닐 때에만 서버 인덱스를 업데이트(라운드 로빈)
@@ -101,9 +98,9 @@ async def youtube(keywords: str, limit: int, retry_count: int = 0):
 
 @app.get("/google")
 async def google(keywords: str, limit: int = 10):
-    SSH_USER = 'root'       # Replace with your SSH username
-    SSH_HOST = '118.67.129.100'  # Replace with your server A hostname or IP
-    REMOTE_PORT = 2345          # Port on which server A is running the API
+    SSH_USER = 'loopit0423'       # Replace with your SSH username
+    SSH_HOST = '35.224.25.10'  # Replace with your server A hostname or IP
+    REMOTE_PORT = 1234          # Port on which server A is running the API
     # Build the query string
     query_params = f"keywords={quote(keywords)}&limit={limit}"
     print(query_params)
@@ -136,10 +133,48 @@ async def google(keywords: str, limit: int = 10):
     return Response(content=stdout.decode('utf-8'), media_type='application/json', status_code=200)
 
 
+@app.get("/google_related")
+async def google_related(keywords: str, limit: int = 10):
+    SSH_USER = 'loopit0423'       # Replace with your SSH username
+    SSH_HOST = '10.128.0.7'       # Replace with your server A hostname or IP
+    REMOTE_PORT = 1234            # Port on which server A is running the API
+    # Build the query string
+    query_params = f"keywords={quote(keywords)}&limit={limit}"
+    print(f"google_related queries: {query_params}")
+
+    # Build the full URL
+    url = f"http://localhost:{REMOTE_PORT}/search/google?{query_params}"
+
+    # Build the curl command as a list
+    curl_command = ['curl', '-s', '-q', '-X', 'GET', url]
+
+    # Build the command string
+    curl_cmd_str = shlex.join(curl_command)
+
+    # Build the SSH command
+    ssh_command = ['ssh', '-o', 'LogLevel=ERROR', f'{SSH_USER}@{SSH_HOST}', '--', curl_cmd_str]
+
+    # Execute the SSH command
+    process = await asyncio.create_subprocess_exec(
+        *ssh_command,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, stderr = await process.communicate()
+
+    # Handle errors
+    if process.returncode != 0:
+        return Response(content=stderr.decode('utf-8'), status_code=500)
+
+    # Return the response from server A
+    return Response(content=stdout.decode('utf-8'), media_type='application/json', status_code=200)
+
+
+
 @app.get("/naver_blog")
 async def naverb(keywords: str, limit: int = 10):
-    SSH_USER = 'root'       # Replace with your SSH username
-    SSH_HOST = '115.85.183.222'  # Replace with your server A hostname or IP
+    SSH_USER = 'loopit0423'       # Replace with your SSH username
+    SSH_HOST = '34.68.35.25'  # Replace with your server A hostname or IP
     REMOTE_PORT = 1234          # Port on which server A is running the API
     # Build the query string
     query_params = f"keywords={quote(keywords)}&limit={limit}"
@@ -174,8 +209,8 @@ async def naverb(keywords: str, limit: int = 10):
     
 @app.get("/naver_cafe")
 async def naverb(keywords: str, limit: int = 10):
-    SSH_USER = 'root'       # Replace with your SSH username
-    SSH_HOST = '115.85.183.222'  # Replace with your server A hostname or IP
+    SSH_USER = 'loopit0423'       # Replace with your SSH username
+    SSH_HOST = '34.68.35.25'  # Replace with your server A hostname or IP
     REMOTE_PORT = 1234          # Port on which server A is running the API
     # Build the query string
     query_params = f"keywords={quote(keywords)}&limit={limit}"
@@ -210,8 +245,8 @@ async def naverb(keywords: str, limit: int = 10):
     
 @app.get("/naver_related")
 async def naverr(keywords: str):
-    SSH_USER = 'root'       # Replace with your SSH username
-    SSH_HOST = '118.67.129.100'  # Replace with your server A hostname or IP
+    SSH_USER = 'loopit0423'       # Replace with your SSH username
+    SSH_HOST = '10.128.0.3'  # Replace with your server A hostname or IP
     REMOTE_PORT = 1234          # Port on which server A is running the API
     # Build the query string
     query_params = f"keywords={quote(keywords)}"
@@ -247,8 +282,8 @@ async def naverr(keywords: str):
 
 @app.get("/naver_popular")
 async def naverp(keywords: str):
-    SSH_USER = 'root'       # Replace with your SSH username
-    SSH_HOST = '118.67.129.100'  # Replace with your server A hostname or IP
+    SSH_USER = 'loopit0423'       # Replace with your SSH username
+    SSH_HOST = '10.128.0.3'  # Replace with your server A hostname or IP
     REMOTE_PORT = 1234          # Port on which server A is running the API
     # Build the query string
     query_params = f"keywords={quote(keywords)}"
@@ -283,8 +318,8 @@ async def naverp(keywords: str):
     
 @app.get("/naver_shopping") # naver_together(함께찾은 키워드임)
 async def navers(keywords: str):
-    SSH_USER = 'root'       # Replace with your SSH username
-    SSH_HOST = '118.67.129.100'  # Replace with your server A hostname or IP
+    SSH_USER = 'loopit0423'       # Replace with your SSH username
+    SSH_HOST = '10.128.0.3'  # Replace with your server A hostname or IP
     REMOTE_PORT = 1234          # Port on which server A is running the API
     # Build the query string
     query_params = f"keywords={quote(keywords)}"
@@ -337,3 +372,75 @@ async def naversr(keywords: str):
         raise HTTPException(status_code=500, detail="Internal Server Error")
 
     return Response(content=json.dumps(result).encode('utf-8'), media_type='application/json', status_code=200)
+
+@app.get("/youtube_suggestion") # 유튜브 예상추천검색어
+async def youtube_suggestion(keywords: str):
+    SSH_USER = 'loopit0423'       # Replace with your SSH username
+    SSH_HOST = '34.123.14.43'  # Replace with your server A hostname or IP
+    REMOTE_PORT = 1234          # Port on which server A is running the API
+    # Build the query string
+    query_params = f"keyword={quote(keywords)}"
+    print(query_params)
+
+    # Build the full URL
+    url = f"http://localhost:{REMOTE_PORT}/search/suggestions?{query_params}"
+
+    # Build the curl command as a list
+    curl_command = ['curl', '-s', '-q', '-X', 'GET', url]
+
+    # Build the command string
+    curl_cmd_str = shlex.join(curl_command)
+
+    # Build the SSH command
+    ssh_command = ['ssh', '-o', 'LogLevel=ERROR', f'{SSH_USER}@{SSH_HOST}', '--', curl_cmd_str]
+
+    # Execute the SSH command
+    process = await asyncio.create_subprocess_exec(
+        *ssh_command,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, stderr = await process.communicate()
+
+    # Handle errors
+    if process.returncode != 0:
+        return Response(content=stderr.decode('utf-8'), status_code=500)
+
+    # Return the response from server A
+    return Response(content=stdout.decode('utf-8'), media_type='application/json', status_code=200)
+
+@app.get("/coupang_related") # 쿠팡 연관검색어
+async def coupang_related(keywords: str):
+    SSH_USER = 'loopit0423'       # Replace with your SSH username
+    SSH_HOST = '34.57.184.127'  # Replace with your server A hostname or IP
+    REMOTE_PORT = 1234          # Port on which server A is running the API
+    # Build the query string
+    query_params = f"keyword={quote(keywords)}"
+    print(query_params)
+
+    # Build the full URL
+    url = f"http://localhost:{REMOTE_PORT}/search/coupang?{query_params}"
+
+    # Build the curl command as a list
+    curl_command = ['curl', '-s', '-q', '-X', 'GET', url]
+
+    # Build the command string
+    curl_cmd_str = shlex.join(curl_command)
+
+    # Build the SSH command
+    ssh_command = ['ssh', '-o', 'LogLevel=ERROR', f'{SSH_USER}@{SSH_HOST}', '--', curl_cmd_str]
+
+    # Execute the SSH command
+    process = await asyncio.create_subprocess_exec(
+        *ssh_command,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, stderr = await process.communicate()
+
+    # Handle errors
+    if process.returncode != 0:
+        return Response(content=stderr.decode('utf-8'), status_code=500)
+
+    # Return the response from server A
+    return Response(content=stdout.decode('utf-8'), media_type='application/json', status_code=200)
