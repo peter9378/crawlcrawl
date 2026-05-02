@@ -1,0 +1,22 @@
+/Users/user/Library/Python/3.9/lib/python/site-packages/urllib3/__init__.py:35: NotOpenSSLWarning: urllib3 v2 only supports OpenSSL 1.1.1+, currently the 'ssl' module is compiled with 'LibreSSL 2.8.3'. See: https://github.com/urllib3/urllib3/issues/3020
+  warnings.warn(
+Waiting for bres...
+Failed: Message: 
+Stacktrace:
+0   chromedriver                        0x0000000100dab99c cxxbridge1$str$ptr + 3160104
+1   chromedriver                        0x0000000100da3a28 cxxbridge1$str$ptr + 3127476
+2   chromedriver                        0x0000000100877904 _RNvCskE0kXQ3GIWk_7___rustc35___rust_no_alloc_shim_is_unstable_v2 + 75036
+3   chromedriver                        0x00000001008bf7d8 _RNvCskE0kXQ3GIWk_7___rustc35___rust_no_alloc_shim_is_unstable_v2 + 369648
+4   chromedriver                        0x00000001008fe4d4 _RNvCskE0kXQ3GIWk_7___rustc35___rust_no_alloc_shim_is_unstable_v2 + 626924
+5   chromedriver                        0x00000001008b51a0 _RNvCskE0kXQ3GIWk_7___rustc35___rust_no_alloc_shim_is_unstable_v2 + 327096
+6   chromedriver                        0x0000000100d6a220 cxxbridge1$str$ptr + 2891948
+7   chromedriver                        0x0000000100d6d910 cxxbridge1$str$ptr + 2906012
+8   chromedriver                        0x0000000100d4f5d8 cxxbridge1$str$ptr + 2782308
+9   chromedriver                        0x0000000100d6e194 cxxbridge1$str$ptr + 2908192
+10  chromedriver                        0x0000000100d40090 cxxbridge1$str$ptr + 2719516
+11  chromedriver                        0x0000000100d92b30 cxxbridge1$str$ptr + 3058108
+12  chromedriver                        0x0000000100d92cac cxxbridge1$str$ptr + 3058488
+13  chromedriver                        0x0000000100da3680 cxxbridge1$str$ptr + 3126540
+14  libsystem_pthread.dylib             0x00000001873342e4 _pthread_start + 136
+15  libsystem_pthread.dylib             0x000000018732f0fc thread_start + 8
+
