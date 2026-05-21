@@ -167,7 +167,7 @@ class Scraper:
 
     def _google_home_url(self) -> str:
         params = {
-            "hl": os.environ.get("DGOOGLE_HL", "ko"),
+            "hl": os.environ.get("DGOOGLE_HL", "en"),
             "gl": os.environ.get("DGOOGLE_GL", "us"),
             "pws": "0",
         }
