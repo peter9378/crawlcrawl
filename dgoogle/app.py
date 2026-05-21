@@ -17,7 +17,7 @@ app = FastAPI()
 executor = ThreadPoolExecutor(max_workers=1)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 
-def google_task(keywords: str, limit: int = 10):
+def google_task(keywords: str, limit: int = 100):
     result = {
         'keyword': keywords,
         'result': []
@@ -26,12 +26,12 @@ def google_task(keywords: str, limit: int = 10):
         scraper = Scraper()
         # keywords = re.sub(r'[^a-zA-Z0-9 ]', '', keywords)
         result = scraper.scrape_google(query=keywords, limit=limit)
-        
+
     except Exception as e:
         traceback.print_exc()
     finally:
         return result
-    
+
 def kill_browser(pid):
     try:
         driver_process = psutil.Process(pid)
@@ -52,19 +52,19 @@ def kill_browser(pid):
         except psutil.TimeoutExpired:
             print(f'Force killing process {child.pid} ({child.name()})')
             child.kill()
-    
+
     driver_process.kill()
 
 
 @app.get("/search/google")
-async def search_google(keywords: str, limit: int = 10):
+async def search_google(keywords: str, limit: int = 100):
     logger = logging.getLogger('uvicorn')
     print(f"keywords: {keywords}, limit: {limit}")
     result = {
         'keyword': keywords,
         'result': []
     }
-    
+
     try:
         loop = asyncio.get_event_loop()
         result = await loop.run_in_executor(executor, google_task, keywords, limit)
@@ -73,6 +73,6 @@ async def search_google(keywords: str, limit: int = 10):
         traceback.print_exc()
     finally:
         return result
-    
+
 if __name__ == '__main__':
     print(search_google(keywords='제일기획'))
