@@ -177,6 +177,15 @@ class Scraper:
     # 이렇게 만들어진 NID/SID/AEC 등 cookie 들이 이후 본 검색에서 봇 점수를 낮춘다.
     _WARMUP_MARKER = "warmup_done"
 
+    # 워밍업이 CAPTCHA 로 막힌 시점. 한번 막혔으면 일정 시간 동안 다시 시도하지 않는다
+    # (반복 시도해 봐야 같은 IP 평판이라 또 CAPTCHA, 시간만 낭비).
+    _warmup_blocked_until: float = 0.0
+    _WARMUP_BLOCK_SECONDS = 300.0  # 5분
+
+    # CAPTCHA 가 한 번 잡히면 같은 호출 안에서의 retry 도 스킵 (의미 없음).
+    _captcha_blocked_until: float = 0.0
+    _CAPTCHA_BLOCK_SECONDS = 60.0  # 1분
+
     def __init__(self):
         self.logger = logging.getLogger('uvicorn')
         # standalone(예: python3 -c "...") 실행 시 uvicorn 로거에 핸들러가 없어
@@ -313,6 +322,14 @@ class Scraper:
         if os.path.exists(marker_path):
             return
 
+        # 직전에 워밍업이 CAPTCHA 로 막혔으면 cooldown 동안 skip.
+        if time.time() < Scraper._warmup_blocked_until:
+            self.logger.info(
+                "[browser] warmup skipped (recently blocked by CAPTCHA, "
+                f"cooldown {Scraper._warmup_blocked_until - time.time():.0f}s)"
+            )
+            return
+
         self.logger.info("[browser] warmup: profile is fresh, doing a natural first session")
         try:
             page.goto(
@@ -326,9 +343,16 @@ class Scraper:
 
             if self._is_captcha(page.url):
                 self.logger.warning(
-                    "[browser] warmup hit CAPTCHA on home; skipping warmup search"
+                    "[browser] warmup: CAPTCHA on home, attempting CapSolver"
                 )
-                return
+                if not self._solve_captcha(page) or self._is_captcha(page.url):
+                    self.logger.warning(
+                        "[browser] warmup home CAPTCHA solve failed; cooldown"
+                    )
+                    Scraper._warmup_blocked_until = (
+                        time.time() + self._WARMUP_BLOCK_SECONDS
+                    )
+                    return
 
             try:
                 page.wait_for_selector(
@@ -366,10 +390,17 @@ class Scraper:
                 time.sleep(random.uniform(2.0, 3.0))
                 if self._is_captcha(page.url):
                     self.logger.warning(
-                        f"[browser] warmup hit CAPTCHA after submit ({page.url}); "
-                        "marker not written, will retry next call"
+                        f"[browser] warmup CAPTCHA after submit ({page.url}); "
+                        "attempting CapSolver"
                     )
-                    return
+                    if not self._solve_captcha(page) or self._is_captcha(page.url):
+                        self.logger.warning(
+                            "[browser] warmup CAPTCHA solve failed; cooldown"
+                        )
+                        Scraper._warmup_blocked_until = (
+                            time.time() + self._WARMUP_BLOCK_SECONDS
+                        )
+                        return
                 # 짧게 머무르며 사용자 같은 행동
                 self._move_mouse_randomly(page)
                 time.sleep(random.uniform(1.0, 2.0))
@@ -458,6 +489,163 @@ class Scraper:
             )
         except Exception as e:
             self.logger.warning(f"[browser/debug] dump completely failed: {e}")
+
+    def _solve_captcha(self, page) -> bool:
+        """CapSolver 로 Google /sorry/ 페이지의 reCAPTCHA 를 풀고 통과시킨다.
+
+        흐름:
+          1) 환경변수 CAPSOLVER_API_KEY 확인 (없으면 false 반환)
+          2) 페이지에서 reCAPTCHA sitekey 추출 ([data-sitekey] 또는 iframe src 의 k= 파라미터)
+          3) CapSolver API 에 ReCaptchaV2TaskProxyless 작업 등록 → token 수신
+             (실패 시 ReCaptchaV2EnterpriseTaskProxyless 로 한 번 더 시도)
+          4) 페이지의 textarea[name=g-recaptcha-response] 에 token 주입
+          5) 등록된 reCAPTCHA callback 이 있으면 호출, 없으면 form.submit()
+          6) navigation 후 url 이 /sorry/ 가 아니면 통과 성공
+        성공 시 True, 실패 시 False.
+        """
+        api_key = os.environ.get("CAPSOLVER_API_KEY")
+        if not api_key:
+            self.logger.error(
+                "[captcha] CAPSOLVER_API_KEY env not set — cannot solve captcha. "
+                "Set it on the container, e.g. -e CAPSOLVER_API_KEY=CAP-xxx"
+            )
+            return False
+
+        try:
+            import capsolver  # type: ignore  # noqa: I001
+        except Exception as e:
+            self.logger.error(f"[captcha] capsolver package not available: {e}")
+            return False
+        capsolver.api_key = api_key
+
+        sorry_url = page.url
+        try:
+            sitekey = page.evaluate(
+                """
+                () => {
+                    const direct = document.querySelector('[data-sitekey]');
+                    if (direct) {
+                        const k = direct.getAttribute('data-sitekey');
+                        if (k) return k;
+                    }
+                    const iframes = Array.from(document.querySelectorAll('iframe'));
+                    for (const f of iframes) {
+                        const src = f.src || '';
+                        const m = src.match(/[?&]k=([^&]+)/);
+                        if (m) return m[1];
+                    }
+                    return null;
+                }
+                """
+            )
+        except Exception as e:
+            self.logger.error(f"[captcha] sitekey extraction failed: {e}")
+            return False
+
+        if not sitekey:
+            self.logger.error(
+                f"[captcha] no recaptcha sitekey on page url={sorry_url}"
+            )
+            return False
+        self.logger.info(
+            f"[captcha] solving via CapSolver, sitekey={sitekey[:10]}..., url={sorry_url}"
+        )
+
+        token: Optional[str] = None
+        last_err: Optional[str] = None
+        for task_type in (
+            "ReCaptchaV2TaskProxyless",
+            "ReCaptchaV2EnterpriseTaskProxyless",
+        ):
+            try:
+                solution = capsolver.solve(
+                    {
+                        "type": task_type,
+                        "websiteURL": sorry_url,
+                        "websiteKey": sitekey,
+                    }
+                )
+                token = (
+                    solution.get("gRecaptchaResponse")
+                    if isinstance(solution, dict)
+                    else None
+                )
+                if token:
+                    self.logger.info(
+                        f"[captcha] CapSolver returned token via {task_type} (len={len(token)})"
+                    )
+                    break
+                last_err = f"{task_type}: empty token in response={solution}"
+            except Exception as e:
+                last_err = f"{task_type}: {e}"
+                self.logger.warning(f"[captcha] {task_type} failed: {e}")
+
+        if not token:
+            self.logger.error(f"[captcha] CapSolver failed — last_err={last_err}")
+            return False
+
+        # 토큰 주입 + 폼 제출
+        try:
+            page.evaluate(
+                """
+                (token) => {
+                    document.querySelectorAll('textarea[name="g-recaptcha-response"]').forEach(t => {
+                        t.style.display = '';
+                        t.value = token;
+                        t.innerText = token;
+                    });
+                    // 이름이 다른 fallback (g-recaptcha-response-XX 등)
+                    document.querySelectorAll('textarea[name^="g-recaptcha-response"]').forEach(t => {
+                        t.value = token;
+                    });
+                    // 등록된 reCAPTCHA callback 호출 (있으면)
+                    try {
+                        if (typeof ___grecaptcha_cfg !== 'undefined' && ___grecaptcha_cfg.clients) {
+                            for (const client of Object.values(___grecaptcha_cfg.clients)) {
+                                for (const item of Object.values(client)) {
+                                    if (item && typeof item === 'object') {
+                                        for (const v of Object.values(item)) {
+                                            if (v && typeof v === 'object' && typeof v.callback === 'function') {
+                                                try { v.callback(token); } catch(e) {}
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    } catch(e) {}
+                }
+                """,
+                token,
+            )
+            # callback 이 navigation 을 트리거하지 않는 경우 form.submit() 으로 강제 제출
+            try:
+                with page.expect_navigation(
+                    wait_until="domcontentloaded", timeout=15000
+                ):
+                    page.evaluate(
+                        """
+                        () => {
+                            const f = document.querySelector('form');
+                            if (f) f.submit();
+                        }
+                        """
+                    )
+            except PlaywrightTimeoutError:
+                # callback 이 이미 navigation 시킨 경우엔 이 wait 가 timeout 됨 — OK
+                pass
+
+            time.sleep(random.uniform(1.5, 2.5))
+            if self._is_captcha(page.url):
+                self.logger.error(
+                    f"[captcha] still on /sorry/ after token submission: {page.url}"
+                )
+                return False
+            self.logger.info(f"[captcha] solved, redirected to {page.url}")
+            return True
+        except Exception as e:
+            self.logger.error(f"[captcha] token submission failed: {e}")
+            return False
 
     def _extract_searchbox_suggestions(self, page, query: str, limit: int) -> list:
         """검색 결과 페이지 검색창 클릭 후 열린 드롭다운 추천 검색어를 파싱.
@@ -792,13 +980,36 @@ class Scraper:
 
                 time.sleep(random.uniform(1.5, 2.5))
 
-                # 4단계: SERP 도달 검증. 직접 URL goto 폴백은 의도적으로 두지 않는다 —
-                # CAPTCHA를 강하게 트리거하기 때문. SERP에 못 갔으면 깔끔히 포기.
+                # 4단계: SERP 도달 검증.
+                # CAPTCHA 면 CapSolver 로 풀어 통과 시도. 실패해도 직접 URL fallback 은 두지 않는다.
                 if self._is_captcha(page.url):
-                    self.logger.error(f"[browser] CAPTCHA after submit: {page.url}")
-                    self._dump_debug_artifacts(page, query, "captcha_after_submit")
-                    context.close()
-                    return results
+                    self.logger.warning(
+                        f"[browser] CAPTCHA after submit: {page.url}, attempting CapSolver"
+                    )
+                    self._dump_debug_artifacts(page, query, "captcha_before_solve")
+                    if self._solve_captcha(page):
+                        # 풀이 성공: redirect 가 SERP 가 아닐 수도 있어(다시 홈 등) 한 번 더 검증
+                        time.sleep(random.uniform(1.0, 2.0))
+                        if self._is_captcha(page.url):
+                            self.logger.error(
+                                f"[browser] solve returned True but still CAPTCHA: {page.url}"
+                            )
+                            Scraper._captcha_blocked_until = (
+                                time.time() + self._CAPTCHA_BLOCK_SECONDS
+                            )
+                            context.close()
+                            return results
+                        self.logger.info(
+                            f"[browser] CAPTCHA solved, post-solve url={page.url}"
+                        )
+                    else:
+                        self.logger.error("[browser] CapSolver could not solve CAPTCHA")
+                        self._dump_debug_artifacts(page, query, "captcha_solve_failed")
+                        Scraper._captcha_blocked_until = (
+                            time.time() + self._CAPTCHA_BLOCK_SECONDS
+                        )
+                        context.close()
+                        return results
 
                 if "/search" not in page.url:
                     self.logger.error(
@@ -908,9 +1119,25 @@ class Scraper:
     # ------------------------------------------------------------------ #
 
     def scrape_google(self, query: str, limit: int = 30) -> list:
+        """SERP dropdown 추천어를 브라우저로 수집한다.
+
+        autocomplete API fallback 은 의도적으로 호출하지 않는다 — SERP dropdown 과
+        본질이 다른 데이터(단순 자동완성 추천)라 사용자 요구사항을 만족시키지 못한다.
+        CAPTCHA 가 발동하면 CAPSOLVER_API_KEY 가 설정된 경우 CapSolver 로 풀이를 시도한다.
+        풀이도 실패하면 빈 리스트를 반환한다 (잘못된 데이터를 주느니 빈 응답이 낫다).
+        """
         print(f"[scraper] query={query}, limit={limit}")
 
-        # 1차: 브라우저로 SERP dropdown 추천 수집. CAPTCHA 발생 시 한 번 retry.
+        if time.time() < Scraper._captcha_blocked_until:
+            cd = Scraper._captcha_blocked_until - time.time()
+            self.logger.warning(
+                f"[scraper] CAPTCHA cooldown active ({cd:.0f}s left), returning empty"
+            )
+            return []
+
+        # 1차: 브라우저로 SERP dropdown 추천 수집.
+        # CAPTCHA 가 잡히면 _scrape_via_browser 안에서 CapSolver 로 자동 풀이 시도.
+        # 실패 시 cooldown 마커가 켜져 두 번째 attempt 는 자동 skip 된다.
         for attempt in (1, 2):
             results = self._scrape_via_browser(query, limit)
             if results:
@@ -919,25 +1146,21 @@ class Scraper:
                     f"keywords={[r['keyword'] for r in results]}"
                 )
                 return results
-            if attempt == 1:
-                # 같은 profile 로 짧게 backoff 후 재시도. CAPTCHA 가 transient 인 경우 통과 가능성.
+            if attempt == 1 and time.time() >= Scraper._captcha_blocked_until:
                 backoff = random.uniform(5.0, 8.0)
                 self.logger.warning(
                     f"[scraper] browser attempt 1 returned empty, retrying after {backoff:.1f}s"
                 )
                 time.sleep(backoff)
+            else:
+                break
 
-        # 2차: 브라우저 경로 두 번 모두 실패 시 Autocomplete API 폴백.
-        # (autocomplete 결과는 SERP dropdown 과 다른 데이터지만, 빈 응답보단 낫다.)
-        self.logger.warning(
-            "[scraper] browser returned empty after retries, falling back to autocomplete"
+        self.logger.error(
+            "[scraper] browser path failed (CAPTCHA solve failed or extraction empty); "
+            "returning empty list. Set CAPSOLVER_API_KEY env if not already, or check "
+            "docker logs for [captcha] entries to diagnose."
         )
-        results = self._scrape_via_autocomplete(query, limit)
-        self.logger.info(
-            f"[scraper] autocomplete fallback: {len(results)} results "
-            f"keywords={[r['keyword'] for r in results]}"
-        )
-        return results
+        return []
 
 
 if __name__ == '__main__':
