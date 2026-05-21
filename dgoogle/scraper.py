@@ -1,4 +1,5 @@
 import logging
+import html
 import os
 import re
 import subprocess
@@ -401,6 +402,9 @@ class Scraper:
 
     @staticmethod
     def _normalize_suggestion_text(text: str) -> str:
+        text = html.unescape(text or "")
+        if "<" in text and ">" in text:
+            text = BeautifulSoup(text, "html.parser").get_text(" ", strip=True)
         text = re.sub(r"\s+", " ", text or "").strip()
         text = re.sub(r"^(?:Search for|Google Search)\s+", "", text, flags=re.I)
         text = re.sub(r"\s+(?:Google Search|Search)$", "", text, flags=re.I)
