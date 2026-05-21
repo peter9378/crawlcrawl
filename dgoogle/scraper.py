@@ -89,6 +89,9 @@ try {
 
 class Scraper:
     _CHROME_PATHS = [
+        # google-chrome-stable .deb 가 설치하는 실제 바이너리. /usr/bin/google-chrome
+        # 심볼릭 링크가 alternatives 시스템 누락 등으로 안 만들어지는 경우에도 매칭된다.
+        "/opt/google/chrome/google-chrome",
         "/usr/bin/google-chrome",
         "/usr/bin/google-chrome-stable",
         "/usr/bin/chromium-browser",
