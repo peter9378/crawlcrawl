@@ -44,6 +44,6 @@ RUN pip3 install --upgrade pip && \
 COPY . .
 
 ENV DISPLAY=:99 \
-    DGOOGLE_PROFILE_DIR=/tmp/dgoogle_profile
+    DGOOGLE_PROFILE_DIR=/tmp/dgoogle_profile_suggest
 
 CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "80"]

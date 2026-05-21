@@ -1,4 +1,3 @@
-import json
 import logging
 import os
 import re
@@ -7,17 +6,11 @@ import sys
 import time
 import random
 import traceback
+from urllib.parse import urlencode
 from typing import Optional
 
 from bs4 import BeautifulSoup
 from DrissionPage import ChromiumPage, ChromiumOptions
-
-
-_USER_AGENTS = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36",
-]
 
 _EXTRACT_JS = """
 return (() => {
@@ -38,19 +31,24 @@ return (() => {
             && rect.width > 0 && rect.height > 0;
     };
     const textFrom = (el) => {
-        const labelled = el.querySelector('[aria-label]');
+        const preferred = el.querySelector(
+            '.wM6W7d span, .wM6W7d, .lnnVSe, [role="option"] span'
+        );
+        if (preferred && preferred.innerText) return preferred.innerText;
+        const labelled = el.matches('[aria-label]')
+            ? el
+            : el.querySelector('[aria-label]');
         if (labelled) {
             const aria = labelled.getAttribute('aria-label');
             if (aria) return aria;
         }
-        const preferred = el.querySelector('.wM6W7d span, .wM6W7d, .lnnVSe');
-        if (preferred && preferred.innerText) return preferred.innerText;
         return el.innerText || el.textContent || '';
     };
     const fallbackSelectors = [
         'ul[role="listbox"] li[role="option"]',
         'ul[role="listbox"] li',
         'div[role="listbox"] [role="option"]',
+        'li[role="presentation"]',
         'li.sbct',
     ];
     for (const selector of fallbackSelectors) {
@@ -66,21 +64,52 @@ return (() => {
 })();
 """
 
-_BTN_K_JS = """
-() => {
-    const btns = Array.from(document.querySelectorAll(
-        'input[name="btnK"], button[name="btnK"]'
+_ACCEPT_CONSENT_JS = """
+return (() => {
+    const visible = (el) => {
+        const style = window.getComputedStyle(el);
+        const rect = el.getBoundingClientRect();
+        return style.visibility !== 'hidden' && style.display !== 'none'
+            && rect.width > 0 && rect.height > 0;
+    };
+    const wanted = [
+        'accept all', 'i agree', 'agree', '동의', '모두 수락', '모두 동의'
+    ];
+    const controls = Array.from(document.querySelectorAll(
+        'button, input[type="submit"], div[role="button"]'
     ));
-    const visible = btns.find(b => {
-        const r = b.getBoundingClientRect();
-        return r.width > 0 && r.height > 0;
-    });
-    if (visible) { visible.click(); return; }
-    const f = document.querySelector(
-        'form[role="search"], form[action*="/search"]'
+    for (const el of controls) {
+        if (!visible(el)) continue;
+        const text = (
+            el.innerText || el.value || el.getAttribute('aria-label') || ''
+        ).trim().toLowerCase();
+        const id = (el.id || '').toLowerCase();
+        if (id === 'l2aglb' || wanted.some(w => text.includes(w))) {
+            el.click();
+            return text || id;
+        }
+    }
+    return null;
+})();
+"""
+
+_CLEAR_SEARCH_JS = """
+return (() => {
+    const el = document.querySelector(
+        'textarea[name="q"], input[name="q"]:not([type="hidden"])'
     );
-    if (f) f.submit();
-}
+    if (!el) return false;
+    el.focus();
+    const proto = el.tagName === 'TEXTAREA'
+        ? HTMLTextAreaElement.prototype
+        : HTMLInputElement.prototype;
+    const descriptor = Object.getOwnPropertyDescriptor(proto, 'value');
+    if (descriptor && descriptor.set) descriptor.set.call(el, '');
+    else el.value = '';
+    el.dispatchEvent(new Event('input', {bubbles: true}));
+    el.dispatchEvent(new Event('change', {bubbles: true}));
+    return true;
+})();
 """
 
 
@@ -93,14 +122,13 @@ class Scraper:
         "/usr/bin/chromium",
     ]
 
-    _FIXED_UA: Optional[str] = None
     _FIXED_VIEWPORT: Optional[dict] = None
-    _PROFILE_DIR = os.environ.get("DGOOGLE_PROFILE_DIR", "/tmp/dgoogle_profile")
-    _WARMUP_MARKER = "warmup_done"
-    _warmup_blocked_until: float = 0.0
-    _WARMUP_BLOCK_SECONDS = 300.0
+    _PROFILE_DIR = os.environ.get(
+        "DGOOGLE_PROFILE_DIR", "/tmp/dgoogle_profile_suggest"
+    )
     _captcha_blocked_until: float = 0.0
-    _CAPTCHA_BLOCK_SECONDS = 60.0
+    _CAPTCHA_BLOCK_SECONDS = float(os.environ.get("DGOOGLE_CAPTCHA_COOLDOWN", "120"))
+    _SUGGEST_WAIT_SECONDS = float(os.environ.get("DGOOGLE_SUGGEST_WAIT", "6"))
 
     def __init__(self):
         self.logger = logging.getLogger("uvicorn")
@@ -120,6 +148,30 @@ class Scraper:
         if not url:
             return False
         return "/sorry/" in url or url.startswith("https://www.google.com/sorry")
+
+    def _is_captcha_page(self, page: ChromiumPage) -> bool:
+        if self._is_captcha(self._page_url(page)):
+            return True
+        try:
+            html = page.html or ""
+        except Exception:
+            return False
+        markers = (
+            'id="captcha-form"',
+            "Our systems have detected unusual traffic",
+            "unusual traffic from your computer network",
+            "g-recaptcha",
+            "/recaptcha/",
+        )
+        return any(marker in html for marker in markers)
+
+    def _google_home_url(self) -> str:
+        params = {
+            "hl": os.environ.get("DGOOGLE_HL", "ko"),
+            "gl": os.environ.get("DGOOGLE_GL", "us"),
+            "pws": "0",
+        }
+        return "https://www.google.com/?" + urlencode(params)
 
     def _find_chrome(self) -> Optional[str]:
         for path in self._CHROME_PATHS:
@@ -142,20 +194,26 @@ class Scraper:
         return None
 
     def _start_xvfb(self) -> Optional[subprocess.Popen]:
+        display = os.environ.get("DGOOGLE_XVFB_DISPLAY", ":99")
         try:
             proc = subprocess.Popen(
-                ["Xvfb", ":99", "-screen", "0", "1920x1080x24", "-ac"],
+                ["Xvfb", display, "-screen", "0", "1920x1080x24", "-ac"],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
-            time.sleep(1.5)
+            os.environ["DISPLAY"] = display
+            time.sleep(1.0)
+            if proc.poll() is not None:
+                self.logger.info(
+                    f"[browser] Xvfb did not stay running on {display}; "
+                    "assuming an existing display or host Chrome display"
+                )
+                return None
             return proc
         except FileNotFoundError:
             return None
 
     def _build_chromium_options(self) -> ChromiumOptions:
-        if Scraper._FIXED_UA is None:
-            Scraper._FIXED_UA = random.choice(_USER_AGENTS)
         if Scraper._FIXED_VIEWPORT is None:
             Scraper._FIXED_VIEWPORT = {
                 "width": random.randint(1800, 1920),
@@ -181,10 +239,13 @@ class Scraper:
         co.set_argument("--disable-notifications")
         co.set_argument("--disable-popup-blocking")
         co.set_argument("--disable-blink-features=AutomationControlled")
+        co.set_argument("--disable-infobars")
+        co.set_argument("--disable-extensions")
+        co.set_argument("--disable-features=Translate,MediaRouter")
         co.set_argument("--no-first-run")
         co.set_argument("--no-default-browser-check")
         co.set_argument("--password-store=basic")
-        co.set_argument("--lang=en-US")
+        co.set_argument(f"--lang={os.environ.get('DGOOGLE_LANG', 'ko-KR')}")
         co.set_argument(f"--window-size={w},{h}")
 
         return co
@@ -207,26 +268,27 @@ class Scraper:
             return ele
         return page.ele("css:input[name='q']:not([type='hidden'])", timeout=timeout)
 
-    def _serp_search_ele(self, page: ChromiumPage, timeout: float = 10):
-        return self._home_search_ele(page, timeout=timeout)
-
-    def _paste_query(self, page: ChromiumPage, query: str) -> None:
-        ele = self._home_search_ele(page)
-        if not ele:
-            raise RuntimeError("homepage search box not found")
-        ele.click()
-        time.sleep(random.uniform(0.1, 0.25))
+    def _clear_search_box(self, page: ChromiumPage, ele) -> None:
+        try:
+            page.run_js(_CLEAR_SEARCH_JS)
+        except Exception:
+            pass
         try:
             ele.clear()
         except Exception:
             pass
-        ele.input(query)
-
-    def _click_google_search(self, page: ChromiumPage) -> None:
-        page.run_js(_BTN_K_JS)
 
     def _wait_after_navigation(self, page: ChromiumPage, seconds: float = 2.0) -> None:
         time.sleep(random.uniform(seconds * 0.75, seconds * 1.25))
+
+    def _accept_consent_if_present(self, page: ChromiumPage) -> None:
+        try:
+            clicked = page.run_js(_ACCEPT_CONSENT_JS)
+            if clicked:
+                self.logger.info(f"[browser] consent accepted via {clicked!r}")
+                self._wait_after_navigation(page, 1.0)
+        except Exception as e:
+            self.logger.debug(f"[browser] consent check skipped: {e}")
 
     def _dump_debug_artifacts(self, page: ChromiumPage, query: str, tag: str) -> None:
         try:
@@ -253,170 +315,20 @@ class Scraper:
         except Exception as e:
             self.logger.warning(f"[browser/debug] dump completely failed: {e}")
 
-    def _solve_captcha(self, page: ChromiumPage) -> bool:
-        api_key = os.environ.get("CAPSOLVER_API_KEY")
-        if not api_key:
-            self.logger.error(
-                "[captcha] CAPSOLVER_API_KEY env not set — cannot solve captcha"
-            )
-            return False
-
-        try:
-            import capsolver  # type: ignore
-        except Exception as e:
-            self.logger.error(f"[captcha] capsolver package not available: {e}")
-            return False
-        capsolver.api_key = api_key
-
-        sorry_url = self._page_url(page)
-        sitekey = page.run_js(
-            """
-            return (() => {
-                const direct = document.querySelector('[data-sitekey]');
-                if (direct) {
-                    const k = direct.getAttribute('data-sitekey');
-                    if (k) return k;
-                }
-                const iframes = Array.from(document.querySelectorAll('iframe'));
-                for (const f of iframes) {
-                    const src = f.src || '';
-                    const m = src.match(/[?&]k=([^&]+)/);
-                    if (m) return m[1];
-                }
-                return null;
-            })();
-            """
-        )
-        if not sitekey:
-            self.logger.error(f"[captcha] no recaptcha sitekey on {sorry_url}")
-            return False
-
-        self.logger.info(
-            f"[captcha] solving via CapSolver, sitekey={str(sitekey)[:10]}..."
-        )
-        token = None
-        last_err = None
-        for task_type in (
-            "ReCaptchaV2TaskProxyless",
-            "ReCaptchaV2EnterpriseTaskProxyless",
-        ):
-            try:
-                solution = capsolver.solve(
-                    {
-                        "type": task_type,
-                        "websiteURL": sorry_url,
-                        "websiteKey": sitekey,
-                    }
-                )
-                token = (
-                    solution.get("gRecaptchaResponse")
-                    if isinstance(solution, dict)
-                    else None
-                )
-                if token:
-                    self.logger.info(f"[captcha] token via {task_type} (len={len(token)})")
-                    break
-                last_err = f"{task_type}: empty token"
-            except Exception as e:
-                last_err = f"{task_type}: {e}"
-                self.logger.warning(f"[captcha] {task_type} failed: {e}")
-
-        if not token:
-            self.logger.error(f"[captcha] CapSolver failed: {last_err}")
-            return False
-
-        try:
-            token_js = json.dumps(token)
-            page.run_js(
-                f"""
-                () => {{
-                    const token = {token_js};
-                    document.querySelectorAll(
-                        'textarea[name="g-recaptcha-response"], textarea[name^="g-recaptcha-response"]'
-                    ).forEach(t => {{
-                        t.style.display = '';
-                        t.value = token;
-                        t.innerText = token;
-                    }});
-                    try {{
-                        if (typeof ___grecaptcha_cfg !== 'undefined' && ___grecaptcha_cfg.clients) {{
-                            for (const client of Object.values(___grecaptcha_cfg.clients)) {{
-                                for (const item of Object.values(client)) {{
-                                    if (item && typeof item === 'object') {{
-                                        for (const v of Object.values(item)) {{
-                                            if (v && typeof v === 'object' && typeof v.callback === 'function') {{
-                                                try {{ v.callback(token); }} catch(e) {{}}
-                                            }}
-                                        }}
-                                    }}
-                                }}
-                            }}
-                        }}
-                    }} catch(e) {{}}
-                }}
-                """
-            )
-            page.run_js(
-                """
-                () => {
-                    const f = document.querySelector('form');
-                    if (f) f.submit();
-                }
-                """
-            )
-            self._wait_after_navigation(page, 2.0)
-            if self._is_captcha(self._page_url(page)):
-                self.logger.error("[captcha] still on /sorry/ after token submit")
-                return False
-            self.logger.info(f"[captcha] solved → {self._page_url(page)}")
-            return True
-        except Exception as e:
-            self.logger.error(f"[captcha] token submission failed: {e}")
-            return False
-
     def _handle_captcha_if_needed(self, page: ChromiumPage, query: str, tag: str) -> bool:
-        """CAPTCHA면 풀이 시도. 통과(True) / CAPTCHA 아님(True) / 실패(False)."""
-        if not self._is_captcha(self._page_url(page)):
+        """CAPTCHA면 중단. CAPTCHA 아님(True) / 차단됨(False)."""
+        if not self._is_captcha_page(page):
             return True
-        self.logger.warning(f"[browser] CAPTCHA at {tag}, attempting CapSolver")
+        self.logger.warning(
+            f"[captcha] blocked at {tag}; not solving CAPTCHA or using "
+            "autocomplete API"
+        )
         self._dump_debug_artifacts(page, query, f"captcha_{tag}")
-        if self._solve_captcha(page):
-            return True
         Scraper._captcha_blocked_until = time.time() + self._CAPTCHA_BLOCK_SECONDS
         return False
 
-    def _warmup_if_needed(self, page: ChromiumPage) -> None:
-        marker_path = os.path.join(self._PROFILE_DIR, self._WARMUP_MARKER)
-        if os.path.exists(marker_path):
-            return
-        if time.time() < Scraper._warmup_blocked_until:
-            self.logger.info("[browser] warmup skipped (CAPTCHA cooldown)")
-            return
-
-        self.logger.info("[browser] warmup: fresh profile, dummy search")
-        try:
-            page.get("https://www.google.com")
-            self._wait_after_navigation(page, 2.5)
-            if not self._handle_captcha_if_needed(page, "warmup", "warmup_home"):
-                Scraper._warmup_blocked_until = time.time() + self._WARMUP_BLOCK_SECONDS
-                return
-
-            self._paste_query(page, "weather today")
-            time.sleep(random.uniform(0.4, 0.8))
-            self._click_google_search(page)
-            self._wait_after_navigation(page, 2.5)
-            if not self._handle_captcha_if_needed(page, "warmup", "warmup_submit"):
-                Scraper._warmup_blocked_until = time.time() + self._WARMUP_BLOCK_SECONDS
-                return
-
-            with open(marker_path, "w") as f:
-                f.write(str(int(time.time())))
-            self.logger.info("[browser] warmup completed")
-        except Exception as e:
-            self.logger.warning(f"[browser] warmup failed: {e}")
-
     def _extract_searchbox_suggestions(
-        self, page: ChromiumPage, query: str, limit: int
+        self, page: ChromiumPage, query: str, limit: int, log: bool = True
     ) -> list:
         raw_items = []
         source = "none"
@@ -440,8 +352,26 @@ class Scraper:
             if raw_items:
                 source = "bs4:data-entityname"
 
-        self.logger.info(f"[browser/extract] source={source}, raw={len(raw_items)}")
-        if raw_items:
+            if not raw_items:
+                selectors = (
+                    "ul[role='listbox'] li[role='option']",
+                    "ul[role='listbox'] li",
+                    "div[role='listbox'] [role='option']",
+                    "li[role='presentation']",
+                    "li.sbct",
+                )
+                for node in soup.select(", ".join(selectors)):
+                    text = node.get_text(separator=" ", strip=True)
+                    if text:
+                        raw_items.append(text)
+                if raw_items:
+                    source = "bs4:listbox"
+
+        if log:
+            self.logger.info(
+                f"[browser/extract] source={source}, raw={len(raw_items)}"
+            )
+        if log and raw_items:
             preview = [str(s)[:80] for s in raw_items[:10]]
             self.logger.info(f"[browser/extract] raw_preview={preview}")
 
@@ -472,13 +402,48 @@ class Scraper:
     @staticmethod
     def _normalize_suggestion_text(text: str) -> str:
         text = re.sub(r"\s+", " ", text or "").strip()
+        text = re.sub(r"^(?:Search for|Google Search)\s+", "", text, flags=re.I)
+        text = re.sub(r"\s+(?:Google Search|Search)$", "", text, flags=re.I)
         text = re.sub(
             r"\s*(?:Remove|삭제|검색어 삭제)\s*$", "", text, flags=re.IGNORECASE
         )
         return text.strip()
 
+    def _wait_for_suggestions(
+        self, page: ChromiumPage, query: str, limit: int, wait_seconds: float
+    ) -> list:
+        deadline = time.time() + wait_seconds
+        results = []
+        while time.time() < deadline:
+            if self._is_captcha_page(page):
+                return []
+            results = self._extract_searchbox_suggestions(
+                page, query, limit, log=False
+            )
+            if results:
+                return results
+            time.sleep(random.uniform(0.2, 0.4))
+        return self._extract_searchbox_suggestions(page, query, limit, log=True)
+
+    def _type_query_for_suggestions(
+        self, page: ChromiumPage, query: str, slow: bool = False
+    ) -> None:
+        ele = self._home_search_ele(page)
+        if not ele:
+            raise RuntimeError("search box not found")
+        ele.click()
+        time.sleep(random.uniform(0.15, 0.35))
+        self._clear_search_box(page, ele)
+        if slow:
+            for char in query:
+                ele.input(char)
+                time.sleep(random.uniform(0.04, 0.12))
+        else:
+            ele.input(query)
+        time.sleep(random.uniform(0.35, 0.7))
+
     def _scrape_via_browser(self, query: str, limit: int) -> list:
-        """DrissionPage: google.com → 검색 → SERP → 검색창 클릭 → dropdown 추출."""
+        """DrissionPage: google.com 홈 검색창에 입력 후 dropdown 추천어 추출."""
         results = []
         xvfb_proc = None
         page = None
@@ -487,18 +452,17 @@ class Scraper:
             if self._is_linux():
                 xvfb_proc = self._start_xvfb()
                 if xvfb_proc:
-                    os.environ["DISPLAY"] = ":99"
-                    print("[dp] Xvfb started on :99")
+                    print(f"[dp] Xvfb started on {os.environ.get('DISPLAY')}")
                 else:
-                    print("[dp] Xvfb not found")
+                    print("[dp] Xvfb not started")
 
             page = self._open_page()
             self.logger.info("[browser] DrissionPage Chromium started")
 
-            self._warmup_if_needed(page)
-
-            page.get("https://www.google.com")
+            home_url = self._google_home_url()
+            page.get(home_url)
             self._wait_after_navigation(page, 2.0)
+            self._accept_consent_if_present(page)
             if not self._handle_captcha_if_needed(page, query, "home"):
                 return results
 
@@ -510,45 +474,22 @@ class Scraper:
                 f"[browser] home url={self._page_url(page)}, title={title!r}"
             )
 
-            self._paste_query(page, query)
-            time.sleep(random.uniform(0.4, 0.8))
-            self._click_google_search(page)
-            self._wait_after_navigation(page, 2.0)
+            self._type_query_for_suggestions(page, query, slow=False)
+            results = self._wait_for_suggestions(
+                page, query, limit, self._SUGGEST_WAIT_SECONDS
+            )
 
-            if not self._handle_captcha_if_needed(page, query, "after_submit"):
-                return results
+            if not results and not self._is_captcha_page(page):
+                self.logger.info(
+                    "[browser] retrying suggestion input with slow typing"
+                )
+                self._type_query_for_suggestions(page, query, slow=True)
+                results = self._wait_for_suggestions(
+                    page, query, limit, self._SUGGEST_WAIT_SECONDS
+                )
 
-            url = self._page_url(page)
-            if "/search" not in url:
-                self.logger.error(f"[browser] not on SERP after submit: {url}")
-                self._dump_debug_artifacts(page, query, "no_serp")
-                return results
-
-            self.logger.info(f"[browser] post-search url={url}")
-
-            serp_ele = self._serp_search_ele(page)
-            if not serp_ele:
-                self.logger.warning("[browser] SERP search box not found")
-                self._dump_debug_artifacts(page, query, "no_searchbox")
-            else:
-                try:
-                    serp_ele.click()
-                    try:
-                        page.wait.ele_loaded(
-                            "css:li[data-attrid=AutocompletePrediction]",
-                            timeout=1.5,
-                        )
-                        self.logger.info("[browser] dropdown listbox attached")
-                    except Exception:
-                        self.logger.warning(
-                            "[browser] dropdown wait timeout; extracting anyway"
-                        )
-                    time.sleep(random.uniform(0.4, 0.8))
-                except Exception as e:
-                    self.logger.warning(f"[browser] SERP search box click failed: {e}")
-                    self._dump_debug_artifacts(page, query, "click_failed")
-
-            results = self._extract_searchbox_suggestions(page, query, limit)
+            if not self._handle_captcha_if_needed(page, query, "suggest"):
+                return []
             if results:
                 self.logger.info(
                     f"[browser] keywords={[r['keyword'] for r in results]}"
@@ -557,6 +498,7 @@ class Scraper:
                 self.logger.warning(
                     f"[browser] no suggestions for query={query!r}"
                 )
+                self._dump_debug_artifacts(page, query, "no_suggestions")
 
         except Exception as e:
             self.logger.error(f"[browser] unexpected error: {e}")
@@ -573,7 +515,7 @@ class Scraper:
         return results
 
     def scrape_google(self, query: str, limit: int = 30) -> list:
-        """SERP 검색창 클릭 후 dropdown 추천어만 반환. autocomplete API 미사용."""
+        """google.com 검색창 dropdown 추천어만 반환. autocomplete API 미사용."""
         print(f"[scraper] query={query}, limit={limit}")
 
         if time.time() < Scraper._captcha_blocked_until:
@@ -601,8 +543,8 @@ class Scraper:
                 break
 
         self.logger.error(
-            "[scraper] failed — empty list. Check [browser]/[captcha] logs. "
-            "Set CAPSOLVER_API_KEY if CAPTCHA persists."
+            "[scraper] failed — empty list. Check [browser]/[captcha] logs and "
+            "debug artifacts under /tmp."
         )
         return []
 
