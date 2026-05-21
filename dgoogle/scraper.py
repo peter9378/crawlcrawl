@@ -429,7 +429,7 @@ class Scraper:
                 f"[browser/extract] source={source}, raw={len(raw_items)}"
             )
         if log and raw_items:
-            preview = [str(s)[:80] for s in raw_items[:10]]
+            preview = [str(s)[:80] for s in raw_items[:30]]
             self.logger.info(f"[browser/extract] raw_preview={preview}")
 
         results = []
@@ -681,4 +681,4 @@ class Scraper:
 
 
 if __name__ == "__main__":
-    print(Scraper().scrape_google("beauty of joseon sunscreen review", limit=10))
+    print(Scraper().scrape_google("beauty of joseon sunscreen review", limit=30))
