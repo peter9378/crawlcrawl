@@ -116,7 +116,8 @@ class Scraper:
 
                 # # 8. Merge: List B + List A (Deduplicate, keep first occurrence)
                 # combined = list_b + list_a
-                
+                combined = list_a
+
                 # Deduplicate preserving order
                 seen = set()
                 rank = 1
