@@ -102,20 +102,20 @@ class Scraper:
                 list_a = self._scrape_suggestion_texts(driver)
                 self.logger.info(f"[YOUTUBE] List A (Focus): {list_a}")
 
-                # 6. 스페이스바 입력 -> List B 업데이트
-                try:
-                    search_input.send_keys(" ")
-                except:
-                    driver.execute_script("arguments[0].value += ' '; arguments[0].dispatchEvent(new Event('input', { bubbles: true }));", search_input)
+                # # 6. 스페이스바 입력 -> List B 업데이트
+                # try:
+                #     search_input.send_keys(" ")
+                # except:
+                #     driver.execute_script("arguments[0].value += ' '; arguments[0].dispatchEvent(new Event('input', { bubbles: true }));", search_input)
                 
-                time.sleep(2) # Wait for update (List B)
+                # time.sleep(2) # Wait for update (List B)
 
-                # 7. List B 추출
-                list_b = self._scrape_suggestion_texts(driver)
-                self.logger.info(f"[YOUTUBE] List B (Space): {list_b}")
+                # # 7. List B 추출
+                # list_b = self._scrape_suggestion_texts(driver)
+                # self.logger.info(f"[YOUTUBE] List B (Space): {list_b}")
 
-                # 8. Merge: List B + List A (Deduplicate, keep first occurrence)
-                combined = list_b + list_a
+                # # 8. Merge: List B + List A (Deduplicate, keep first occurrence)
+                # combined = list_b + list_a
                 
                 # Deduplicate preserving order
                 seen = set()
