@@ -22,10 +22,17 @@ _USER_AGENTS = [
 ]
 
 # playwright 사용 시 stealth 스크립트
+# 봇 탐지 회피를 위한 navigator/WebGL/permissions/plugins fingerprint 위장.
 _STEALTH_JS = """
+// navigator.webdriver 제거 — 가장 흔한 자동화 탐지 포인트
+try { Object.defineProperty(navigator, 'webdriver', { get: () => undefined }); } catch(e) {}
+
+// chrome runtime 모킹
 if (!window.chrome) {
   window.chrome = { runtime: {}, loadTimes: function(){}, csi: function(){}, app: {} };
 }
+
+// plugins / mimeTypes - 일반 사용자 환경처럼
 try {
   Object.defineProperty(navigator, 'plugins', {
     get: () => {
@@ -39,18 +46,36 @@ try {
     }
   });
 } catch(e) {}
+
+// 언어/하드웨어 수치들을 자연스러운 값으로
 Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
+try { Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 8 }); } catch(e) {}
+try { Object.defineProperty(navigator, 'deviceMemory', { get: () => 8 }); } catch(e) {}
+try { Object.defineProperty(navigator, 'maxTouchPoints', { get: () => 0 }); } catch(e) {}
+try { Object.defineProperty(navigator, 'platform', { get: () => 'Linux x86_64' }); } catch(e) {}
+
+// permissions API: notifications 쿼리 시 자동화 표식이 노출되는 케이스 우회
 try {
   const _orig = window.navigator.permissions.query.bind(window.navigator.permissions);
   window.navigator.permissions.query = (p) =>
     p.name === 'notifications' ? Promise.resolve({ state: Notification.permission }) : _orig(p);
 } catch(e) {}
+
+// WebGL vendor/renderer 위장 (UNMASKED_VENDOR_WEBGL=37445, UNMASKED_RENDERER_WEBGL=37446)
 try {
   const _get = WebGLRenderingContext.prototype.getParameter;
   WebGLRenderingContext.prototype.getParameter = function(p) {
     if (p === 37445) return 'Intel Inc.';
     if (p === 37446) return 'Intel Iris OpenGL Engine';
     return _get.call(this, p);
+  };
+} catch(e) {}
+try {
+  const _get2 = WebGL2RenderingContext.prototype.getParameter;
+  WebGL2RenderingContext.prototype.getParameter = function(p) {
+    if (p === 37445) return 'Intel Inc.';
+    if (p === 37446) return 'Intel Iris OpenGL Engine';
+    return _get2.call(this, p);
   };
 } catch(e) {}
 """
@@ -69,6 +94,16 @@ class Scraper:
         "/usr/bin/chromium-browser",
         "/usr/bin/chromium",
     ]
+
+    # 모든 호출에서 동일한 fingerprint를 쓰도록 클래스 단위로 1회만 결정한다.
+    # 같은 user_data_dir(영속 프로필)에 매번 다른 UA로 들어오면 봇 시그널이 된다.
+    _FIXED_UA: Optional[str] = None
+    _FIXED_VIEWPORT: Optional[dict] = None
+
+    # 영속 프로필 디렉토리. 컨테이너 lifecycle 동안 cookies/local storage가 누적되어
+    # Google이 "기존 사용자"로 인식 → CAPTCHA 빈도가 줄어든다.
+    # 환경변수로 override 가능 (예: docker volume mount 시).
+    _PROFILE_DIR = os.environ.get("DGOOGLE_PROFILE_DIR", "/tmp/dgoogle_profile")
 
     def __init__(self):
         self.logger = logging.getLogger('uvicorn')
@@ -412,14 +447,36 @@ class Scraper:
             else:
                 print("[pw] Running headed (non-Linux, native display)")
 
-            ua = random.choice(_USER_AGENTS)
-            width = random.randint(1800, 1920)
-            height = random.randint(900, 1080)
+            # UA / viewport는 클래스 단위로 고정. 같은 영속 profile에서 매 요청마다
+            # UA가 바뀌면 그 자체가 봇 시그널이 된다.
+            if Scraper._FIXED_UA is None:
+                Scraper._FIXED_UA = random.choice(_USER_AGENTS)
+            if Scraper._FIXED_VIEWPORT is None:
+                Scraper._FIXED_VIEWPORT = {
+                    "width": random.randint(1800, 1920),
+                    "height": random.randint(900, 1080),
+                }
+            ua = Scraper._FIXED_UA
+            width = Scraper._FIXED_VIEWPORT["width"]
+            height = Scraper._FIXED_VIEWPORT["height"]
+
+            os.makedirs(self._PROFILE_DIR, exist_ok=True)
 
             with sync_playwright() as pw:
                 chrome_path = self._find_chrome()
+                # launch_persistent_context: browser와 context를 한 번에 생성하면서
+                # user_data_dir(영속 profile) 사용. cookies/localStorage/cache가 누적되어
+                # Google이 "기존 사용자"로 인식 → CAPTCHA 점수 ↓.
                 launch_kwargs = dict(
+                    user_data_dir=self._PROFILE_DIR,
                     headless=headless,
+                    user_agent=ua,
+                    viewport={"width": width, "height": height},
+                    locale="en-US",
+                    extra_http_headers={
+                        "Accept-Language": "en-US,en;q=0.9",
+                        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+                    },
                     args=[
                         "--no-sandbox",
                         "--disable-dev-shm-usage",
@@ -431,6 +488,12 @@ class Scraper:
                         "--disable-blink-features=AutomationControlled",
                         "--disable-software-rasterizer",
                         "--disable-extensions",
+                        # 첫 실행 안내 / 기본 브라우저 체크 / OS keyring 접근 비활성화
+                        "--no-first-run",
+                        "--no-default-browser-check",
+                        "--password-store=basic",
+                        "--use-mock-keychain",
+                        "--disable-features=IsolateOrigins,site-per-process",
                         "--lang=en-US",
                         f"--window-size={width},{height}",
                     ],
@@ -438,21 +501,13 @@ class Scraper:
                 if chrome_path:
                     launch_kwargs["executable_path"] = chrome_path
 
-                browser = pw.chromium.launch(**launch_kwargs)
-                # context 설정 단순화: timezone/geolocation override 제거.
-                # IP와 mismatch 되면 봇 탐지 신호가 강해진다. OS/IP 기본값을 따른다.
-                # locale/Accept-Language는 영어 우선만 살짝 남겨둔다 (mismatch 위험 낮음).
-                context = browser.new_context(
-                    viewport={"width": width, "height": height},
-                    user_agent=ua,
-                    locale="en-US",
-                    extra_http_headers={
-                        "Accept-Language": "en-US,en;q=0.9",
-                        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-                    },
-                )
+                context = pw.chromium.launch_persistent_context(**launch_kwargs)
                 context.add_init_script(_STEALTH_JS)
-                page = context.new_page()
+                page = (
+                    context.pages[0]
+                    if context.pages
+                    else context.new_page()
+                )
 
                 # 1단계: 그냥 https://www.google.com 으로 접속.
                 # /ncr 사전방문, ?gl=us&hl=en 파라미터 강제 등은 모두 봇 탐지 신호로 작용해서
@@ -471,7 +526,6 @@ class Scraper:
                     self.logger.error(f"[browser] CAPTCHA on homepage: {page.url}")
                     self._dump_debug_artifacts(page, query, "captcha_home")
                     context.close()
-                    browser.close()
                     return results
 
                 self.logger.info(
@@ -497,7 +551,6 @@ class Scraper:
                     )
                     self._dump_debug_artifacts(page, query, "no_home_input")
                     context.close()
-                    browser.close()
                     return results
 
                 # 3단계: "Google Search" 버튼 클릭으로 submit.
@@ -547,7 +600,6 @@ class Scraper:
                 if not navigated:
                     self._dump_debug_artifacts(page, query, "no_navigation")
                     context.close()
-                    browser.close()
                     return results
 
                 time.sleep(random.uniform(1.5, 2.5))
@@ -558,7 +610,6 @@ class Scraper:
                     self.logger.error(f"[browser] CAPTCHA after submit: {page.url}")
                     self._dump_debug_artifacts(page, query, "captcha_after_submit")
                     context.close()
-                    browser.close()
                     return results
 
                 if "/search" not in page.url:
@@ -567,7 +618,6 @@ class Scraper:
                     )
                     self._dump_debug_artifacts(page, query, "no_serp")
                     context.close()
-                    browser.close()
                     return results
 
                 self.logger.info(
@@ -617,7 +667,6 @@ class Scraper:
                         f"[browser] no suggestions extracted for query={query!r}"
                     )
                 context.close()
-                browser.close()
 
         except Exception as e:
             self.logger.error(f'[browser] Unexpected error: {str(e)}')
