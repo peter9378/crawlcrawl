@@ -113,6 +113,50 @@ return (() => {
 })();
 """
 
+_SUBMIT_SEARCH_JS = """
+return (() => {
+    const visible = (el) => {
+        const style = window.getComputedStyle(el);
+        const rect = el.getBoundingClientRect();
+        return style.visibility !== 'hidden' && style.display !== 'none'
+            && rect.width > 0 && rect.height > 0;
+    };
+    const buttons = Array.from(document.querySelectorAll(
+        'input[name="btnK"], button[name="btnK"]'
+    ));
+    const button = buttons.find(visible);
+    if (button) {
+        button.click();
+        return 'button';
+    }
+    const input = document.querySelector(
+        'textarea[name="q"], input[name="q"]:not([type="hidden"])'
+    );
+    const form = input ? input.closest('form') : document.querySelector(
+        'form[role="search"], form[action*="/search"]'
+    );
+    if (form) {
+        form.requestSubmit ? form.requestSubmit() : form.submit();
+        return 'form';
+    }
+    return null;
+})();
+"""
+
+_FOCUS_SEARCH_JS = """
+return (() => {
+    const el = document.querySelector(
+        'textarea[name="q"], input[name="q"]:not([type="hidden"])'
+    );
+    if (!el) return false;
+    el.focus();
+    el.click();
+    el.dispatchEvent(new MouseEvent('mousedown', {bubbles: true}));
+    el.dispatchEvent(new MouseEvent('mouseup', {bubbles: true}));
+    return true;
+})();
+"""
+
 
 class Scraper:
     _CHROME_PATHS = [
@@ -173,6 +217,15 @@ class Scraper:
             "pws": "0",
         }
         return "https://www.google.com/?" + urlencode(params)
+
+    def _google_search_url(self, query: str) -> str:
+        params = {
+            "q": query,
+            "hl": os.environ.get("DGOOGLE_HL", "en"),
+            "gl": os.environ.get("DGOOGLE_GL", "us"),
+            "pws": "0",
+        }
+        return "https://www.google.com/search?" + urlencode(params)
 
     def _find_chrome(self) -> Optional[str]:
         for path in self._CHROME_PATHS:
@@ -246,7 +299,10 @@ class Scraper:
         co.set_argument("--no-first-run")
         co.set_argument("--no-default-browser-check")
         co.set_argument("--password-store=basic")
-        co.set_argument(f"--lang={os.environ.get('DGOOGLE_LANG', 'ko-KR')}")
+        co.set_argument(f"--lang={os.environ.get('DGOOGLE_LANG', 'en-US')}")
+        co.set_argument(
+            f"--accept-lang={os.environ.get('DGOOGLE_ACCEPT_LANG', 'en-US,en')}"
+        )
         co.set_argument(f"--window-size={w},{h}")
 
         return co
@@ -446,8 +502,66 @@ class Scraper:
             ele.input(query)
         time.sleep(random.uniform(0.35, 0.7))
 
+    def _submit_search_from_home(self, page: ChromiumPage, query: str) -> bool:
+        ele = self._home_search_ele(page)
+        if not ele:
+            self.logger.warning("[browser] home search box not found")
+            return False
+        ele.click()
+        time.sleep(random.uniform(0.25, 0.5))
+        self._clear_search_box(page, ele)
+        for char in query:
+            ele.input(char)
+            time.sleep(random.uniform(0.03, 0.09))
+        time.sleep(random.uniform(0.45, 0.9))
+
+        submitted = None
+        try:
+            submitted = page.run_js(_SUBMIT_SEARCH_JS)
+        except Exception as e:
+            self.logger.warning(f"[browser] JS submit failed: {e}")
+        if not submitted:
+            try:
+                ele.input("\n")
+                submitted = "enter"
+            except Exception as e:
+                self.logger.warning(f"[browser] Enter submit failed: {e}")
+
+        self.logger.info(f"[browser] search submitted via {submitted!r}")
+        self._wait_after_navigation(page, 2.5)
+        return "/search" in self._page_url(page)
+
+    def _ensure_results_page(self, page: ChromiumPage, query: str) -> bool:
+        if "/search" in self._page_url(page):
+            return True
+
+        search_url = self._google_search_url(query)
+        self.logger.warning(
+            f"[browser] submit did not reach SERP, opening search url: {search_url}"
+        )
+        page.get(search_url)
+        self._wait_after_navigation(page, 2.5)
+        return "/search" in self._page_url(page)
+
+    def _click_serp_searchbox(self, page: ChromiumPage, query: str) -> bool:
+        ele = self._home_search_ele(page, timeout=8)
+        if not ele:
+            self.logger.warning("[browser] SERP search box not found")
+            self._dump_debug_artifacts(page, query, "no_serp_searchbox")
+            return False
+
+        try:
+            ele.click()
+            page.run_js(_FOCUS_SEARCH_JS)
+        except Exception as e:
+            self.logger.warning(f"[browser] SERP search box click failed: {e}")
+            self._dump_debug_artifacts(page, query, "serp_click_failed")
+            return False
+        time.sleep(random.uniform(0.5, 0.9))
+        return True
+
     def _scrape_via_browser(self, query: str, limit: int) -> list:
-        """DrissionPage: google.com 홈 검색창에 입력 후 dropdown 추천어 추출."""
+        """DrissionPage: google.com 검색 후 SERP 검색창 dropdown 추천어 추출."""
         results = []
         xvfb_proc = None
         page = None
@@ -478,14 +592,27 @@ class Scraper:
                 f"[browser] home url={self._page_url(page)}, title={title!r}"
             )
 
-            self._type_query_for_suggestions(page, query, slow=False)
+            if not self._submit_search_from_home(page, query):
+                if not self._handle_captcha_if_needed(page, query, "after_submit"):
+                    return []
+            if not self._ensure_results_page(page, query):
+                self.logger.warning(f"[browser] not on SERP: {self._page_url(page)}")
+                self._dump_debug_artifacts(page, query, "no_serp")
+                return []
+            if not self._handle_captcha_if_needed(page, query, "serp"):
+                return []
+
+            self.logger.info(f"[browser] SERP url={self._page_url(page)}")
+            if not self._click_serp_searchbox(page, query):
+                return []
+
             results = self._wait_for_suggestions(
                 page, query, limit, self._SUGGEST_WAIT_SECONDS
             )
 
             if not results and not self._is_captcha_page(page):
                 self.logger.info(
-                    "[browser] retrying suggestion input with slow typing"
+                    "[browser] retrying SERP suggestion input with slow typing"
                 )
                 self._type_query_for_suggestions(page, query, slow=True)
                 results = self._wait_for_suggestions(
@@ -519,7 +646,7 @@ class Scraper:
         return results
 
     def scrape_google(self, query: str, limit: int = 30) -> list:
-        """google.com 검색창 dropdown 추천어만 반환. autocomplete API 미사용."""
+        """google.com 검색 결과 페이지 검색창 dropdown 추천어 반환."""
         print(f"[scraper] query={query}, limit={limit}")
 
         if time.time() < Scraper._captcha_blocked_until:
