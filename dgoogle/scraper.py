@@ -21,63 +21,127 @@ _USER_AGENTS = [
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36",
 ]
 
-# playwright 사용 시 stealth 스크립트
-# 봇 탐지 회피를 위한 navigator/WebGL/permissions/plugins fingerprint 위장.
-_STEALTH_JS = """
-// navigator.webdriver 제거 — 가장 흔한 자동화 탐지 포인트
-try { Object.defineProperty(navigator, 'webdriver', { get: () => undefined }); } catch(e) {}
+# playwright 사용 시 stealth 스크립트.
+# 헤드리스/자동화 탐지에 사용되는 알려진 fingerprint 들을 일반 사용자처럼 위장한다.
+# (참고: puppeteer-extra-plugin-stealth, playwright-stealth 의 핵심 패치들을 포팅)
+_STEALTH_JS = r"""
+(() => {
+  // navigator.webdriver 제거 — 자동화 탐지 1순위
+  try { Object.defineProperty(navigator, 'webdriver', { get: () => undefined }); } catch(e) {}
 
-// chrome runtime 모킹
-if (!window.chrome) {
-  window.chrome = { runtime: {}, loadTimes: function(){}, csi: function(){}, app: {} };
-}
+  // chrome.* 객체 위장 (Chromium에는 기본 존재, headless 에선 비어있음 → 봇 시그널)
+  if (!window.chrome) { window.chrome = {}; }
+  try {
+    window.chrome.runtime = window.chrome.runtime || {
+      OnInstalledReason: { CHROME_UPDATE: 'chrome_update', INSTALL: 'install', SHARED_MODULE_UPDATE: 'shared_module_update', UPDATE: 'update' },
+      OnRestartRequiredReason: { APP_UPDATE: 'app_update', OS_UPDATE: 'os_update', PERIODIC: 'periodic' },
+      PlatformArch: { ARM: 'arm', ARM64: 'arm64', MIPS: 'mips', MIPS64: 'mips64', X86_32: 'x86-32', X86_64: 'x86-64' },
+      PlatformOs: { ANDROID: 'android', CROS: 'cros', LINUX: 'linux', MAC: 'mac', OPENBSD: 'openbsd', WIN: 'win' },
+      RequestUpdateCheckStatus: { NO_UPDATE: 'no_update', THROTTLED: 'throttled', UPDATE_AVAILABLE: 'update_available' }
+    };
+    window.chrome.app = window.chrome.app || { isInstalled: false, InstallState: { DISABLED: 'disabled', INSTALLED: 'installed', NOT_INSTALLED: 'not_installed' }, RunningState: { CANNOT_RUN: 'cannot_run', READY_TO_RUN: 'ready_to_run', RUNNING: 'running' } };
+    window.chrome.loadTimes = window.chrome.loadTimes || function(){ return { commitLoadTime: 0, connectionInfo: 'http/1.1', finishDocumentLoadTime: 0, finishLoadTime: 0, firstPaintAfterLoadTime: 0, firstPaintTime: 0, navigationType: 'Other', npnNegotiatedProtocol: 'unknown', requestTime: 0, startLoadTime: 0, wasAlternateProtocolAvailable: false, wasFetchedViaSpdy: false, wasNpnNegotiated: false }; };
+    window.chrome.csi = window.chrome.csi || function(){ return { onloadT: Date.now(), pageT: 0, startE: Date.now(), tran: 15 }; };
+  } catch(e) {}
 
-// plugins / mimeTypes - 일반 사용자 환경처럼
-try {
-  Object.defineProperty(navigator, 'plugins', {
-    get: () => {
-      const arr = [
-        { name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
-        { name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai', description: '' },
-        { name: 'Native Client', filename: 'internal-nacl-plugin', description: '' },
-      ];
-      arr.__proto__ = PluginArray.prototype;
-      return arr;
+  // plugins / mimeTypes 일반 사용자 환경처럼
+  try {
+    Object.defineProperty(navigator, 'plugins', {
+      get: () => {
+        const arr = [
+          { name: 'PDF Viewer', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
+          { name: 'Chrome PDF Viewer', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
+          { name: 'Chromium PDF Viewer', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
+          { name: 'Microsoft Edge PDF Viewer', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
+          { name: 'WebKit built-in PDF', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
+        ];
+        arr.__proto__ = PluginArray.prototype;
+        return arr;
+      }
+    });
+  } catch(e) {}
+
+  // 언어/하드웨어 수치를 자연스러운 값으로
+  try { Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] }); } catch(e) {}
+  try { Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 8 }); } catch(e) {}
+  try { Object.defineProperty(navigator, 'deviceMemory', { get: () => 8 }); } catch(e) {}
+  try { Object.defineProperty(navigator, 'maxTouchPoints', { get: () => 0 }); } catch(e) {}
+  try { Object.defineProperty(navigator, 'platform', { get: () => 'Linux x86_64' }); } catch(e) {}
+
+  // permissions API: 'notifications' 쿼리 시 prompt/denied 일관성 유지
+  try {
+    const _orig = window.navigator.permissions.query.bind(window.navigator.permissions);
+    window.navigator.permissions.query = (p) =>
+      p && p.name === 'notifications'
+        ? Promise.resolve({ state: Notification.permission })
+        : _orig(p);
+  } catch(e) {}
+
+  // WebGL vendor/renderer 위장 (UNMASKED_VENDOR_WEBGL=37445, UNMASKED_RENDERER_WEBGL=37446)
+  try {
+    const _get = WebGLRenderingContext.prototype.getParameter;
+    WebGLRenderingContext.prototype.getParameter = function(p) {
+      if (p === 37445) return 'Intel Inc.';
+      if (p === 37446) return 'Intel Iris OpenGL Engine';
+      return _get.call(this, p);
+    };
+  } catch(e) {}
+  try {
+    const _get2 = WebGL2RenderingContext.prototype.getParameter;
+    WebGL2RenderingContext.prototype.getParameter = function(p) {
+      if (p === 37445) return 'Intel Inc.';
+      if (p === 37446) return 'Intel Iris OpenGL Engine';
+      return _get2.call(this, p);
+    };
+  } catch(e) {}
+
+  // Battery API — headless 환경에서 비어있는 케이스 위장
+  try {
+    if (!navigator.getBattery) {
+      Object.defineProperty(navigator, 'getBattery', {
+        value: () => Promise.resolve({ charging: true, chargingTime: 0, dischargingTime: Infinity, level: 1, addEventListener: () => {}, removeEventListener: () => {} })
+      });
     }
-  });
-} catch(e) {}
+  } catch(e) {}
 
-// 언어/하드웨어 수치들을 자연스러운 값으로
-Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
-try { Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 8 }); } catch(e) {}
-try { Object.defineProperty(navigator, 'deviceMemory', { get: () => 8 }); } catch(e) {}
-try { Object.defineProperty(navigator, 'maxTouchPoints', { get: () => 0 }); } catch(e) {}
-try { Object.defineProperty(navigator, 'platform', { get: () => 'Linux x86_64' }); } catch(e) {}
+  // Network connection — headless 에서 종종 undefined
+  try {
+    if (!navigator.connection) {
+      Object.defineProperty(navigator, 'connection', {
+        get: () => ({ downlink: 10, effectiveType: '4g', rtt: 50, saveData: false, type: 'wifi' })
+      });
+    }
+  } catch(e) {}
 
-// permissions API: notifications 쿼리 시 자동화 표식이 노출되는 케이스 우회
-try {
-  const _orig = window.navigator.permissions.query.bind(window.navigator.permissions);
-  window.navigator.permissions.query = (p) =>
-    p.name === 'notifications' ? Promise.resolve({ state: Notification.permission }) : _orig(p);
-} catch(e) {}
+  // iframe contentWindow 자동화 탐지 우회
+  try {
+    const desc = Object.getOwnPropertyDescriptor(HTMLIFrameElement.prototype, 'contentWindow');
+    if (desc && desc.get) {
+      Object.defineProperty(HTMLIFrameElement.prototype, 'contentWindow', {
+        get: function() {
+          const w = desc.get.call(this);
+          try { Object.defineProperty(w.navigator, 'webdriver', { get: () => undefined }); } catch(e) {}
+          return w;
+        }
+      });
+    }
+  } catch(e) {}
 
-// WebGL vendor/renderer 위장 (UNMASKED_VENDOR_WEBGL=37445, UNMASKED_RENDERER_WEBGL=37446)
-try {
-  const _get = WebGLRenderingContext.prototype.getParameter;
-  WebGLRenderingContext.prototype.getParameter = function(p) {
-    if (p === 37445) return 'Intel Inc.';
-    if (p === 37446) return 'Intel Iris OpenGL Engine';
-    return _get.call(this, p);
-  };
-} catch(e) {}
-try {
-  const _get2 = WebGL2RenderingContext.prototype.getParameter;
-  WebGL2RenderingContext.prototype.getParameter = function(p) {
-    if (p === 37445) return 'Intel Inc.';
-    if (p === 37446) return 'Intel Iris OpenGL Engine';
-    return _get2.call(this, p);
-  };
-} catch(e) {}
+  // Notification.permission 일관성 (granted 가 자동화 시그널이 되는 경우가 있음)
+  try {
+    if (Notification && Notification.permission === 'denied') {
+      Object.defineProperty(Notification, 'permission', { get: () => 'default' });
+    }
+  } catch(e) {}
+
+  // outerWidth / outerHeight — headless 에서 0 인 경우가 있음
+  try {
+    if (window.outerWidth === 0) {
+      Object.defineProperty(window, 'outerWidth', { get: () => window.innerWidth });
+      Object.defineProperty(window, 'outerHeight', { get: () => window.innerHeight });
+    }
+  } catch(e) {}
+})();
 """
 
 # 의도적으로 비워둠.
@@ -107,6 +171,11 @@ class Scraper:
     # Google이 "기존 사용자"로 인식 → CAPTCHA 빈도가 줄어든다.
     # 환경변수로 override 가능 (예: docker volume mount 시).
     _PROFILE_DIR = os.environ.get("DGOOGLE_PROFILE_DIR", "/tmp/dgoogle_profile")
+
+    # 워밍업 marker 파일. profile 에 워밍업 흔적이 없으면 첫 호출 시 자연스러운
+    # 사용자 세션을 흉내내 google.com 에 잠시 머무르고 더미 검색을 한 번 실행한다.
+    # 이렇게 만들어진 NID/SID/AEC 등 cookie 들이 이후 본 검색에서 봇 점수를 낮춘다.
+    _WARMUP_MARKER = "warmup_done"
 
     def __init__(self):
         self.logger = logging.getLogger('uvicorn')
@@ -227,6 +296,97 @@ class Scraper:
             except Exception:
                 pass
         return None
+
+    def _warmup_if_needed(self, page) -> None:
+        """profile 디렉토리에 warmup marker 가 없으면 자연스러운 첫 세션을 흉내낸다.
+
+        목적: 빈 cookie jar 상태에서 곧바로 검색을 시도하면 Google 이 "이 IP의 새 익명
+        사용자가 갑자기 검색"하는 패턴으로 인식해 CAPTCHA 점수를 높인다. 따라서 첫 컨테
+        이너 호출에서:
+          1) google.com 에 진입해서 약간 머무르고 (마우스 움직임)
+          2) 평범한 더미 검색 ('weather' 등) 을 한 번 정상 수행
+          3) marker 파일을 남겨 다음 호출부터는 skip
+        이렇게 하면 NID/SID/AEC 같은 cookie 가 정상 흐름으로 누적되고
+        Google 입장에서는 "기존 활동 사용자가 다음 검색을 하는" 자연스러운 패턴이 된다.
+        """
+        marker_path = os.path.join(self._PROFILE_DIR, self._WARMUP_MARKER)
+        if os.path.exists(marker_path):
+            return
+
+        self.logger.info("[browser] warmup: profile is fresh, doing a natural first session")
+        try:
+            page.goto(
+                "https://www.google.com",
+                wait_until="domcontentloaded",
+                timeout=30000,
+            )
+            time.sleep(random.uniform(2.0, 3.5))
+            self._move_mouse_randomly(page)
+            time.sleep(random.uniform(0.8, 1.6))
+
+            if self._is_captcha(page.url):
+                self.logger.warning(
+                    "[browser] warmup hit CAPTCHA on home; skipping warmup search"
+                )
+                return
+
+            try:
+                page.wait_for_selector(
+                    'textarea[name="q"], input[name="q"]:not([type="hidden"])',
+                    timeout=8000,
+                )
+                sel = (
+                    'textarea[name="q"]'
+                    if page.query_selector('textarea[name="q"]')
+                    else 'input[name="q"]:not([type="hidden"])'
+                )
+                self._paste_text(page, sel, "weather today")
+                time.sleep(random.uniform(0.5, 1.0))
+                with page.expect_navigation(
+                    wait_until="domcontentloaded", timeout=15000
+                ):
+                    page.evaluate(
+                        """
+                        () => {
+                            const btns = Array.from(document.querySelectorAll(
+                                'input[name="btnK"], button[name="btnK"]'
+                            ));
+                            const visible = btns.find(b => {
+                                const r = b.getBoundingClientRect();
+                                return r.width > 0 && r.height > 0;
+                            });
+                            if (visible) { visible.click(); return; }
+                            const f = document.querySelector(
+                                'form[role="search"], form[action*="/search"]'
+                            );
+                            if (f) f.submit();
+                        }
+                        """
+                    )
+                time.sleep(random.uniform(2.0, 3.0))
+                if self._is_captcha(page.url):
+                    self.logger.warning(
+                        f"[browser] warmup hit CAPTCHA after submit ({page.url}); "
+                        "marker not written, will retry next call"
+                    )
+                    return
+                # 짧게 머무르며 사용자 같은 행동
+                self._move_mouse_randomly(page)
+                time.sleep(random.uniform(1.0, 2.0))
+            except Exception as e:
+                self.logger.warning(f"[browser] warmup search failed: {e}")
+                return
+
+            # 워밍업 성공 → marker 작성
+            try:
+                with open(marker_path, "w") as f:
+                    f.write(str(int(time.time())))
+                self.logger.info("[browser] warmup completed and marker saved")
+            except Exception as e:
+                self.logger.warning(f"[browser] failed to write warmup marker: {e}")
+
+        except Exception as e:
+            self.logger.warning(f"[browser] warmup phase failed: {e}")
 
     def _paste_text(self, page, selector: str, text: str):
         """검색창에 한 번에 값을 채운다 (복사-붙여넣기 효과).
@@ -479,7 +639,14 @@ class Scraper:
                     extra_http_headers={
                         "Accept-Language": "en-US,en;q=0.9",
                         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+                        # Client Hints 헤더 — 실제 Chrome 이 보내는 값을 명시해서 헤더 누락이 봇 시그널이 되지 않게.
+                        "sec-ch-ua": '"Chromium";v="135", "Not-A.Brand";v="24", "Google Chrome";v="135"',
+                        "sec-ch-ua-mobile": "?0",
+                        "sec-ch-ua-platform": '"Linux"',
                     },
+                    # playwright 가 기본으로 추가하는 --enable-automation 플래그를 제거.
+                    # 이 플래그는 Chrome 의 navigator.webdriver=true 를 강제하고 자동화 광고 신호가 된다.
+                    ignore_default_args=["--enable-automation"],
                     args=[
                         "--no-sandbox",
                         "--disable-dev-shm-usage",
@@ -491,7 +658,6 @@ class Scraper:
                         "--disable-blink-features=AutomationControlled",
                         "--disable-software-rasterizer",
                         "--disable-extensions",
-                        # 첫 실행 안내 / 기본 브라우저 체크 / OS keyring 접근 비활성화
                         "--no-first-run",
                         "--no-default-browser-check",
                         "--password-store=basic",
@@ -501,6 +667,20 @@ class Scraper:
                         f"--window-size={width},{height}",
                     ],
                 )
+
+                # Proxy 환경변수 hook — DGOOGLE_PROXY_SERVER 가 설정돼 있으면 사용.
+                # 예: DGOOGLE_PROXY_SERVER=http://scraperapi:KEY@proxy.scraperapi.com:8001
+                # ScraperAPI / Zyte / BrightData 같은 residential proxy 도입 시 코드 수정 없이 켤 수 있다.
+                proxy_server = os.environ.get("DGOOGLE_PROXY_SERVER")
+                if proxy_server:
+                    proxy_cfg = {"server": proxy_server}
+                    if os.environ.get("DGOOGLE_PROXY_USERNAME"):
+                        proxy_cfg["username"] = os.environ["DGOOGLE_PROXY_USERNAME"]
+                    if os.environ.get("DGOOGLE_PROXY_PASSWORD"):
+                        proxy_cfg["password"] = os.environ["DGOOGLE_PROXY_PASSWORD"]
+                    launch_kwargs["proxy"] = proxy_cfg
+                    self.logger.info(f"[browser] using proxy: {proxy_server}")
+
                 if chrome_path:
                     launch_kwargs["executable_path"] = chrome_path
 
@@ -511,6 +691,11 @@ class Scraper:
                     if context.pages
                     else context.new_page()
                 )
+
+                # 0단계: 영속 profile 이 fresh 한 경우(=NID/SID 등 cookie 미 누적) 자연스러운
+                # 첫 세션을 흉내내 cookie 평판을 만든 뒤 본 검색에 들어간다.
+                # 두 번째 호출부터는 marker 가 있어 즉시 통과.
+                self._warmup_if_needed(page)
 
                 # 1단계: 그냥 https://www.google.com 으로 접속.
                 # /ncr 사전방문, ?gl=us&hl=en 파라미터 강제 등은 모두 봇 탐지 신호로 작용해서
@@ -629,6 +814,7 @@ class Scraper:
 
                 # 5단계: SERP 검색창 클릭으로 드롭다운 추천 트리거.
                 # input[type="hidden"]은 CAPTCHA 토큰일 수 있으므로 명시 제외.
+                # 단순 click 보다 hover→click 시퀀스가 자연스러우며 dropdown 트리거도 더 안정적.
                 clicked = False
                 try:
                     page.wait_for_selector(
@@ -641,8 +827,35 @@ class Scraper:
                         if page.query_selector('textarea[name="q"]')
                         else 'input[name="q"]:not([type="hidden"])'
                     )
-                    page.click(serp_selector, force=True)
+                    locator = page.locator(serp_selector).first
+                    try:
+                        locator.scroll_into_view_if_needed(timeout=2000)
+                    except Exception:
+                        pass
+                    try:
+                        locator.hover(timeout=2000)
+                        time.sleep(random.uniform(0.15, 0.35))
+                    except Exception:
+                        pass
+                    locator.click(force=True, timeout=5000)
                     clicked = True
+
+                    # dropdown listbox 가 attached 될 때까지 최대 1.5s 대기.
+                    # 사용자 피드백상 단순 sleep 0.4-0.8s 만으로 dropdown 이 늦게 떠 놓치는 케이스가 있음.
+                    try:
+                        page.wait_for_selector(
+                            'ul[role="listbox"], div[role="listbox"], '
+                            'li[data-attrid="AutocompletePrediction"]',
+                            timeout=1500,
+                            state="attached",
+                        )
+                        self.logger.info("[browser] dropdown listbox attached")
+                    except PlaywrightTimeoutError:
+                        self.logger.warning(
+                            "[browser] dropdown listbox not attached within 1.5s; "
+                            "will still try DOM extract"
+                        )
+                    # 추가 안정 대기 (애니메이션 후 텍스트 fully rendered 까지)
                     time.sleep(random.uniform(0.4, 0.8))
                 except PlaywrightTimeoutError:
                     self.logger.warning(
@@ -697,17 +910,28 @@ class Scraper:
     def scrape_google(self, query: str, limit: int = 30) -> list:
         print(f"[scraper] query={query}, limit={limit}")
 
-        # 1차: 실제 Google 검색 페이지에서 검색창 드롭다운 추천어 수집
-        results = self._scrape_via_browser(query, limit)
-        if results:
-            self.logger.info(
-                f"[scraper] browser success: {len(results)} results "
-                f"keywords={[r['keyword'] for r in results]}"
-            )
-            return results
+        # 1차: 브라우저로 SERP dropdown 추천 수집. CAPTCHA 발생 시 한 번 retry.
+        for attempt in (1, 2):
+            results = self._scrape_via_browser(query, limit)
+            if results:
+                self.logger.info(
+                    f"[scraper] browser success (attempt {attempt}): {len(results)} results "
+                    f"keywords={[r['keyword'] for r in results]}"
+                )
+                return results
+            if attempt == 1:
+                # 같은 profile 로 짧게 backoff 후 재시도. CAPTCHA 가 transient 인 경우 통과 가능성.
+                backoff = random.uniform(5.0, 8.0)
+                self.logger.warning(
+                    f"[scraper] browser attempt 1 returned empty, retrying after {backoff:.1f}s"
+                )
+                time.sleep(backoff)
 
-        # 2차: 브라우저 경로 실패 시 Autocomplete API 폴백
-        self.logger.warning("[scraper] browser returned empty, falling back to autocomplete")
+        # 2차: 브라우저 경로 두 번 모두 실패 시 Autocomplete API 폴백.
+        # (autocomplete 결과는 SERP dropdown 과 다른 데이터지만, 빈 응답보단 낫다.)
+        self.logger.warning(
+            "[scraper] browser returned empty after retries, falling back to autocomplete"
+        )
         results = self._scrape_via_autocomplete(query, limit)
         self.logger.info(
             f"[scraper] autocomplete fallback: {len(results)} results "
