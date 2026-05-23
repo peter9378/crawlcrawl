@@ -171,8 +171,6 @@ class Scraper:
     _PROFILE_DIR = os.environ.get(
         "DGOOGLE_PROFILE_DIR", "/tmp/dgoogle_profile_suggest"
     )
-    _captcha_blocked_until: float = 0.0
-    _CAPTCHA_BLOCK_SECONDS = float(os.environ.get("DGOOGLE_CAPTCHA_COOLDOWN", "120"))
     _SUGGEST_WAIT_SECONDS = float(os.environ.get("DGOOGLE_SUGGEST_WAIT", "6"))
 
     def __init__(self):
@@ -381,7 +379,6 @@ class Scraper:
             "autocomplete API"
         )
         self._dump_debug_artifacts(page, query, f"captcha_{tag}")
-        Scraper._captcha_blocked_until = time.time() + self._CAPTCHA_BLOCK_SECONDS
         return False
 
     def _extract_searchbox_suggestions(
@@ -649,13 +646,6 @@ class Scraper:
         """google.com 검색 결과 페이지 검색창 dropdown 추천어 반환."""
         print(f"[scraper] query={query}, limit={limit}")
 
-        if time.time() < Scraper._captcha_blocked_until:
-            cd = Scraper._captcha_blocked_until - time.time()
-            self.logger.warning(
-                f"[scraper] CAPTCHA cooldown ({cd:.0f}s left), returning empty"
-            )
-            return []
-
         for attempt in (1, 2):
             results = self._scrape_via_browser(query, limit)
             if results:
@@ -664,14 +654,12 @@ class Scraper:
                     f"keywords={[r['keyword'] for r in results]}"
                 )
                 return results
-            if attempt == 1 and time.time() >= Scraper._captcha_blocked_until:
+            if attempt == 1:
                 backoff = random.uniform(5.0, 8.0)
                 self.logger.warning(
                     f"[scraper] retry after {backoff:.1f}s"
                 )
                 time.sleep(backoff)
-            else:
-                break
 
         self.logger.error(
             "[scraper] failed — empty list. Check [browser]/[captcha] logs and "
