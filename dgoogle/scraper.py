@@ -172,6 +172,8 @@ class Scraper:
         "DGOOGLE_PROFILE_DIR", "/tmp/dgoogle_profile_suggest"
     )
     _SUGGEST_WAIT_SECONDS = float(os.environ.get("DGOOGLE_SUGGEST_WAIT", "6"))
+    # CAPTCHA 연속 실패 시 대기(초): 1분 → 2분30초 → 5분 → 10분
+    _CAPTCHA_BACKOFF_SECONDS = (60, 150, 300, 600)
 
     def __init__(self):
         self.logger = logging.getLogger("uvicorn")
@@ -557,9 +559,14 @@ class Scraper:
         time.sleep(random.uniform(0.5, 0.9))
         return True
 
-    def _scrape_via_browser(self, query: str, limit: int) -> list:
-        """DrissionPage: google.com 검색 후 SERP 검색창 dropdown 추천어 추출."""
+    def _scrape_via_browser(self, query: str, limit: int) -> tuple[list, bool]:
+        """DrissionPage: google.com 검색 후 SERP 검색창 dropdown 추천어 추출.
+
+        Returns:
+            (results, captcha_hit) — captcha_hit이 True면 CAPTCHA로 중단됨.
+        """
         results = []
+        captcha_hit = False
         xvfb_proc = None
         page = None
 
@@ -579,7 +586,7 @@ class Scraper:
             self._wait_after_navigation(page, 2.0)
             self._accept_consent_if_present(page)
             if not self._handle_captcha_if_needed(page, query, "home"):
-                return results
+                return [], True
 
             try:
                 title = page.title
@@ -591,17 +598,19 @@ class Scraper:
 
             if not self._submit_search_from_home(page, query):
                 if not self._handle_captcha_if_needed(page, query, "after_submit"):
-                    return []
+                    return [], True
             if not self._ensure_results_page(page, query):
                 self.logger.warning(f"[browser] not on SERP: {self._page_url(page)}")
                 self._dump_debug_artifacts(page, query, "no_serp")
-                return []
+                if self._is_captcha_page(page):
+                    return [], True
+                return [], False
             if not self._handle_captcha_if_needed(page, query, "serp"):
-                return []
+                return [], True
 
             self.logger.info(f"[browser] SERP url={self._page_url(page)}")
             if not self._click_serp_searchbox(page, query):
-                return []
+                return [], False
 
             results = self._wait_for_suggestions(
                 page, query, limit, self._SUGGEST_WAIT_SECONDS
@@ -617,7 +626,7 @@ class Scraper:
                 )
 
             if not self._handle_captcha_if_needed(page, query, "suggest"):
-                return []
+                return [], True
             if results:
                 self.logger.info(
                     f"[browser] keywords={[r['keyword'] for r in results]}"
@@ -627,6 +636,9 @@ class Scraper:
                     f"[browser] no suggestions for query={query!r}"
                 )
                 self._dump_debug_artifacts(page, query, "no_suggestions")
+
+            if not results and page is not None and self._is_captcha_page(page):
+                captcha_hit = True
 
         except Exception as e:
             self.logger.error(f"[browser] unexpected error: {e}")
@@ -640,26 +652,62 @@ class Scraper:
             if xvfb_proc:
                 xvfb_proc.terminate()
 
-        return results
+        return results, captcha_hit
+
+    @staticmethod
+    def _format_backoff(seconds: float) -> str:
+        if seconds >= 60:
+            mins, secs = divmod(int(seconds), 60)
+            if secs:
+                return f"{mins}m{secs}s"
+            return f"{mins}m"
+        return f"{int(seconds)}s"
 
     def scrape_google(self, query: str, limit: int = 30) -> list:
         """google.com 검색 결과 페이지 검색창 dropdown 추천어 반환."""
         print(f"[scraper] query={query}, limit={limit}")
 
-        for attempt in (1, 2):
-            results = self._scrape_via_browser(query, limit)
+        captcha_failures = 0
+        generic_retries = 0
+        run = 0
+
+        while True:
+            run += 1
+            results, captcha_hit = self._scrape_via_browser(query, limit)
             if results:
                 self.logger.info(
-                    f"[scraper] success attempt {attempt}: {len(results)} "
+                    f"[scraper] success run {run}: {len(results)} "
                     f"keywords={[r['keyword'] for r in results]}"
                 )
                 return results
-            if attempt == 1:
+
+            if captcha_hit:
+                captcha_failures += 1
+                if captcha_failures > len(self._CAPTCHA_BACKOFF_SECONDS):
+                    self.logger.error(
+                        f"[captcha] gave up after {captcha_failures} CAPTCHA "
+                        f"failures for query={query!r}"
+                    )
+                    break
+                wait = self._CAPTCHA_BACKOFF_SECONDS[captcha_failures - 1]
+                self.logger.warning(
+                    f"[captcha] failure {captcha_failures}/"
+                    f"{len(self._CAPTCHA_BACKOFF_SECONDS)} for query={query!r}; "
+                    f"waiting {self._format_backoff(wait)} before retry"
+                )
+                time.sleep(wait)
+                continue
+
+            if generic_retries < 1:
+                generic_retries += 1
                 backoff = random.uniform(5.0, 8.0)
                 self.logger.warning(
-                    f"[scraper] retry after {backoff:.1f}s"
+                    f"[scraper] no results (non-CAPTCHA), retry after {backoff:.1f}s"
                 )
                 time.sleep(backoff)
+                continue
+
+            break
 
         self.logger.error(
             "[scraper] failed — empty list. Check [browser]/[captcha] logs and "
