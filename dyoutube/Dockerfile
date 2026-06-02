@@ -12,7 +12,7 @@ RUN echo "ip_resolve=4" >> /etc/dnf/dnf.conf && \
     dnf clean all && \
     dnf install -y epel-release && \
     sed -i 's/^metalink=/#metalink=/g' /etc/yum.repos.d/epel*.repo 2>/dev/null || true && \
-    sed -i 's/^#baseurl=http/baseurl=http/g' /etc/yum.repos.d/epel*.repo 2>/dev/null || true && \
+    sed -i 's|^#baseurl=https://download.example/pub|baseurl=https://dl.fedoraproject.org/pub|g' /etc/yum.repos.d/epel*.repo 2>/dev/null || true && \
     dnf clean all && \
     dnf install -y \
         python3 \
