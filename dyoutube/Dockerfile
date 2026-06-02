@@ -1,11 +1,14 @@
-FROM python:3.8-slim
+FROM python:3.11-slim-bookworm
 
-RUN apt-get update && apt-get install -yqq \
-    wget \
+ENV CHROMEDRIVER_PATH=/usr/local/bin/chromedriver \
+    DEBIAN_FRONTEND=noninteractive
+
+# 일부 Docker 환경에서 기본 DNS(127.0.0.11) 해석이 실패하는 경우가 있어 명시적으로 설정
+RUN printf "nameserver 8.8.8.8\nnameserver 8.8.4.4\n" > /etc/resolv.conf && \
+    apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
     curl \
     unzip \
-    build-essential \
-    python3-dev \
     fonts-liberation \
     libasound2 \
     libatk-bridge2.0-0 \
@@ -26,36 +29,24 @@ RUN apt-get update && apt-get install -yqq \
     libxkbcommon0 \
     libxrandr2 \
     xdg-utils \
-    libcurl3-gnutls \
-    libcurl3-nss \
-    libcurl4 && \
-    wget https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb && \
-    dpkg -i google-chrome-stable_current_amd64.deb && \
-    rm google-chrome-stable_current_amd64.deb && \
-    CHROME_MAJOR="$(google-chrome --version | awk '{print $3}' | cut -d. -f1)" && \
-    DRIVER_VERSION="$(curl -fsSL "https://googlechromelabs.github.io/chrome-for-testing/LATEST_RELEASE_${CHROME_MAJOR}")" && \
-    curl -fsSL "https://storage.googleapis.com/chrome-for-testing-public/${DRIVER_VERSION}/linux64/chromedriver-linux64.zip" -o /tmp/chromedriver.zip && \
-    unzip -q /tmp/chromedriver.zip -d /tmp && \
-    install -m 0755 /tmp/chromedriver-linux64/chromedriver /usr/local/bin/chromedriver && \
-    rm -rf /tmp/chromedriver.zip /tmp/chromedriver-linux64 && \
-    apt-get clean && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/*
 
-ENV CHROMEDRIVER_PATH=/usr/local/bin/chromedriver
+# Google Chrome .deb 대신 Chrome for Testing 바이너리 사용 (버전 불일치 방지)
+RUN CHROME_VERSION="$(curl -fsSL https://googlechromelabs.github.io/chrome-for-testing/LATEST_RELEASE_STABLE)" && \
+    curl -fsSL "https://storage.googleapis.com/chrome-for-testing-public/${CHROME_VERSION}/linux64/chrome-linux64.zip" -o /tmp/chrome.zip && \
+    curl -fsSL "https://storage.googleapis.com/chrome-for-testing-public/${CHROME_VERSION}/linux64/chromedriver-linux64.zip" -o /tmp/chromedriver.zip && \
+    unzip -q /tmp/chrome.zip -d /opt && \
+    unzip -q /tmp/chromedriver.zip -d /opt && \
+    ln -sf /opt/chrome-linux64/chrome /usr/local/bin/google-chrome && \
+    ln -sf /opt/chromedriver-linux64/chromedriver /usr/local/bin/chromedriver && \
+    rm -f /tmp/chrome.zip /tmp/chromedriver.zip
 
 WORKDIR /app
 
-COPY . .
-
-RUN pip install --upgrade pip && \
+COPY requirements.txt .
+RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -r requirements.txt
 
-# Gunicorn + Uvicorn workers로 실행
-# gunicorn.conf.py 파일에서 설정 관리
-# 주요 설정:
-# - workers: 2 (환경변수 GUNICORN_WORKERS로 조정 가능)
-# - worker-class: uvicorn.workers.UvicornWorker (ASGI 지원)
-# - max-requests: 1000 (메모리 누수 방지를 위한 자동 워커 재시작)
-# - timeout: 120초 (Selenium 작업을 위한 긴 타임아웃)
+COPY . .
+
 CMD ["gunicorn", "app:app", "-c", "gunicorn.conf.py"]
-
-
