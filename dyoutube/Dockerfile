@@ -3,7 +3,17 @@ FROM rockylinux:9
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-RUN dnf install -y epel-release && \
+# GCP 네트워크/DNS 해소 및 IPv6 타임아웃 방지 (Curl Error 6 총망라 대응)
+RUN echo "ip_resolve=4" >> /etc/dnf/dnf.conf && \
+    echo "timeout=15" >> /etc/dnf/dnf.conf && \
+    echo "retries=5" >> /etc/dnf/dnf.conf && \
+    sed -i 's/^mirrorlist=/#mirrorlist=/g' /etc/yum.repos.d/rocky*.repo 2>/dev/null || true && \
+    sed -i 's/^#baseurl=http/baseurl=http/g' /etc/yum.repos.d/rocky*.repo 2>/dev/null || true && \
+    dnf clean all && \
+    dnf install -y epel-release && \
+    sed -i 's/^metalink=/#metalink=/g' /etc/yum.repos.d/epel*.repo 2>/dev/null || true && \
+    sed -i 's/^#baseurl=http/baseurl=http/g' /etc/yum.repos.d/epel*.repo 2>/dev/null || true && \
+    dnf clean all && \
     dnf install -y \
         python3 \
         python3-pip \
@@ -32,11 +42,11 @@ RUN dnf install -y epel-release && \
         xdg-utils \
     && dnf clean all
 
-# Chrome 브라우저 설치 (Selenium Manager가 드라이버 자동 관리)
-RUN wget -q https://dl.google.com/linux/direct/google-chrome-stable_current_x86_64.rpm \
+# Chrome 브라우저 설치 (IPv4 강제 적용)
+RUN wget -q --inet4-only https://dl.google.com/linux/direct/google-chrome-stable_current_x86_64.rpm \
         -O /tmp/chrome.rpm && \
     dnf install -y /tmp/chrome.rpm && \
-    rm /tmp/chrome.rpm && \
+    rm -f /tmp/chrome.rpm && \
     ln -sf /opt/google/chrome/google-chrome /usr/bin/google-chrome 2>/dev/null || true
 
 WORKDIR /app
