@@ -16,8 +16,8 @@ app = FastAPI(
     version="2.0.0"
 )
 
-# ThreadPoolExecutor 설정 (CPU 코어 * 2)
-executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="scraper_worker")
+# ThreadPoolExecutor 설정 (8GB 메모리 안정을 위해 max_workers 제한)
+executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="scraper_worker")
 
 # 애플리케이션 시작 시 로거 설정
 logging.basicConfig(
