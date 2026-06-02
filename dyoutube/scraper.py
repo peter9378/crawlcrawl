@@ -14,6 +14,7 @@ from selenium.common.exceptions import (
 )
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.common.action_chains import ActionChains
 
 # 개선된 셀레니움 드라이버 풀 사용
 from selenium_driver import SeleniumDriver
@@ -32,7 +33,7 @@ class Scraper:
         드라이버 풀을 사용하여 성능을 개선합니다.
         """
         # gl=us를 붙여서 미국검색을 한다.
-        base_url = f"https://www.youtube.com/results?search_query={query}&gl=us"
+        base_url = "https://www.youtube.com/?gl=us"
         results = []
 
         try:
@@ -43,11 +44,40 @@ class Scraper:
             
             with pool.get_driver(base_url) as driver_wrapper:
                 driver = driver_wrapper.driver
+                wait = WebDriverWait(driver, 10)
                 
                 self.logger.info("[YOUTUBE] Driver obtained from pool. Page loaded.")
                 
-                # 페이지가 완전히 로드될 때까지 대기
-                time.sleep(2)
+                # 1. 페이지 로딩 대기 (검색창이 나타날 때까지 대기)
+                time.sleep(0.5)  # 최소한의 스크립트 바인딩 시간 확보
+                try:
+                    search_input_home = wait.until(
+                        EC.element_to_be_clickable((By.NAME, "search_query"))
+                    )
+                    self.logger.info("[YOUTUBE] Found home search input")
+                    
+                    # 성능 개선: 글자를 하나씩 타이핑하지 않고 JavaScript로 즉시 주입 (복사-붙여넣기 시뮬레이션)
+                    driver.execute_script(
+                        "arguments[0].value = arguments[1]; "
+                        "arguments[0].dispatchEvent(new Event('input', { bubbles: true })); "
+                        "arguments[0].dispatchEvent(new Event('change', { bubbles: true }));",
+                        search_input_home, query
+                    )
+                    search_input_home.send_keys(Keys.RETURN)
+                    self.logger.info(f"[YOUTUBE] Injected query '{query}' via JS and pressed ENTER")
+
+                except Exception as e:
+                    self.logger.error(f"[YOUTUBE] Failed to search on home page: {e}")
+                    raise e
+                
+                # 3. 결과 페이지 로딩 대기 (고정 대기 대신 동적 대기로 시간 단축)
+                try:
+                    wait.until(EC.url_contains("results"))
+                    wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "ytd-video-renderer, ytd-reel-item-renderer")))
+                    self.logger.info("[YOUTUBE] Search results loaded successfully")
+                except Exception as e:
+                    self.logger.warning(f"[YOUTUBE] Timeout waiting for search results: {e}, continuing...")
+                self.logger.info(f"[YOUTUBE] Current URL after search: {driver.current_url}")
 
                 self.logger.info("[YOUTUBE] Start scrolling...")
                 try:
