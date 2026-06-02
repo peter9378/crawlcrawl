@@ -4,8 +4,8 @@ FROM python:3.11-slim-bookworm
 ENV CHROMEDRIVER_PATH=/usr/local/bin/chromedriver \
     DEBIAN_FRONTEND=noninteractive
 
-# apt/curl 단계는 호스트 네트워크 사용 (Docker 빌드 DNS 127.0.0.11 실패 대응)
-RUN --network=host apt-get update && apt-get install -y --no-install-recommends \
+# apt/curl 단계는 호스트 네트워크 사용 해제
+RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     curl \
     unzip \
@@ -31,7 +31,7 @@ RUN --network=host apt-get update && apt-get install -y --no-install-recommends 
     xdg-utils \
     && rm -rf /var/lib/apt/lists/*
 
-RUN --network=host CHROME_VERSION="$(curl -fsSL https://googlechromelabs.github.io/chrome-for-testing/LATEST_RELEASE_STABLE)" && \
+RUN CHROME_VERSION="$(curl -fsSL https://googlechromelabs.github.io/chrome-for-testing/LATEST_RELEASE_STABLE)" && \
     curl -fsSL "https://storage.googleapis.com/chrome-for-testing-public/${CHROME_VERSION}/linux64/chrome-linux64.zip" -o /tmp/chrome.zip && \
     curl -fsSL "https://storage.googleapis.com/chrome-for-testing-public/${CHROME_VERSION}/linux64/chromedriver-linux64.zip" -o /tmp/chromedriver.zip && \
     unzip -q /tmp/chrome.zip -d /opt && \
@@ -43,7 +43,7 @@ RUN --network=host CHROME_VERSION="$(curl -fsSL https://googlechromelabs.github.
 WORKDIR /app
 
 COPY requirements.txt .
-RUN --network=host pip install --no-cache-dir --upgrade pip && \
+RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -r requirements.txt
 
 COPY . .
