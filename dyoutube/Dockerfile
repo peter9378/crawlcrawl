@@ -1,11 +1,11 @@
+# syntax=docker/dockerfile:1
 FROM python:3.11-slim-bookworm
 
 ENV CHROMEDRIVER_PATH=/usr/local/bin/chromedriver \
     DEBIAN_FRONTEND=noninteractive
 
-# 일부 Docker 환경에서 기본 DNS(127.0.0.11) 해석이 실패하는 경우가 있어 명시적으로 설정
-RUN printf "nameserver 8.8.8.8\nnameserver 8.8.4.4\n" > /etc/resolv.conf && \
-    apt-get update && apt-get install -y --no-install-recommends \
+# apt/curl 단계는 호스트 네트워크 사용 (Docker 빌드 DNS 127.0.0.11 실패 대응)
+RUN --network=host apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     curl \
     unzip \
@@ -31,8 +31,7 @@ RUN printf "nameserver 8.8.8.8\nnameserver 8.8.4.4\n" > /etc/resolv.conf && \
     xdg-utils \
     && rm -rf /var/lib/apt/lists/*
 
-# Google Chrome .deb 대신 Chrome for Testing 바이너리 사용 (버전 불일치 방지)
-RUN CHROME_VERSION="$(curl -fsSL https://googlechromelabs.github.io/chrome-for-testing/LATEST_RELEASE_STABLE)" && \
+RUN --network=host CHROME_VERSION="$(curl -fsSL https://googlechromelabs.github.io/chrome-for-testing/LATEST_RELEASE_STABLE)" && \
     curl -fsSL "https://storage.googleapis.com/chrome-for-testing-public/${CHROME_VERSION}/linux64/chrome-linux64.zip" -o /tmp/chrome.zip && \
     curl -fsSL "https://storage.googleapis.com/chrome-for-testing-public/${CHROME_VERSION}/linux64/chromedriver-linux64.zip" -o /tmp/chromedriver.zip && \
     unzip -q /tmp/chrome.zip -d /opt && \
@@ -44,7 +43,7 @@ RUN CHROME_VERSION="$(curl -fsSL https://googlechromelabs.github.io/chrome-for-t
 WORKDIR /app
 
 COPY requirements.txt .
-RUN pip install --no-cache-dir --upgrade pip && \
+RUN --network=host pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -r requirements.txt
 
 COPY . .
