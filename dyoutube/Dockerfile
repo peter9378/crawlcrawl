@@ -17,6 +17,8 @@ RUN echo "ip_resolve=4" >> /etc/dnf/dnf.conf && \
     dnf install -y \
         python3 \
         python3-pip \
+        python3-devel \
+        gcc \
         wget \
         unzip \
         xorg-x11-server-Xvfb \
