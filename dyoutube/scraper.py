@@ -1,3 +1,4 @@
+import gc
 import json
 import logging
 import re
@@ -81,10 +82,35 @@ class Scraper:
 
                 self.logger.info("[YOUTUBE] Start scrolling...")
                 try:
-                    driver_wrapper.scroll_down(nloop=limit + 1, scroll_increment=300, delay=1.0)
-                    time.sleep(2)  # 페이지 로딩이 완전히 끝날 때까지 대기
+                    # 개선: limit 개수만큼만 확인하며 동적 스크롤 (속도 및 성능 최적화)
+                    last_height = driver.execute_script("return document.documentElement.scrollHeight")
+                    max_scrolls = (limit // 10) + 15  # 대략 1번 스크롤 시 최소 10~20개 로딩 가정
+                    
+                    for _ in range(max_scrolls):
+                        # 현재 렌더링된 아이템 개수 확인 (DOM 직접 조회로 Python 메모리 부하 및 통신 지연 최소화)
+                        current_count = driver.execute_script(
+                            "return document.querySelectorAll('ytd-video-renderer, ytd-reel-item-renderer').length;"
+                        )
+                        if current_count >= limit:
+                            self.logger.info(f"[YOUTUBE] Sufficient items loaded ({current_count} >= {limit}). Stop scrolling.")
+                            break
+                            
+                        # 끝까지 스크롤
+                        driver.execute_script("window.scrollTo(0, document.documentElement.scrollHeight);")
+                        time.sleep(1.5)  # 새로운 항목이 로딩될 때까지 대기
+                        
+                        new_height = driver.execute_script("return document.documentElement.scrollHeight")
+                        if new_height == last_height:
+                            # 더이상 높이 변화가 없으면 지연 대기 후 재확인
+                            time.sleep(1.5)
+                            new_height = driver.execute_script("return document.documentElement.scrollHeight")
+                            if new_height == last_height:
+                                self.logger.info("[YOUTUBE] Reached bottom of the page. No more items to load.")
+                                break
+                        last_height = new_height
+                        
                 except Exception as e:
-                    self.logger.warning(f"[YOUTUBE] Error during scroll: {e}, continuing anyway...")
+                    self.logger.warning(f"[YOUTUBE] Error during dynamic scroll: {e}, continuing anyway...")
 
                 # 검색 결과 페이지 파싱
                 html_content = driver_wrapper.get_page_source()
@@ -99,6 +125,12 @@ class Scraper:
                 self.logger.info(f"[YOUTUBE] Parsed {len(all_items)} items from search page.")
                 results = self._parse_items(driver, all_items, limit)
                 self.logger.info(f"[YOUTUBE] Scraped total {len(results)} items.")
+                
+                # 메모리 안정성 개선: BeautifulSoup 객체 및 대용량 HTML 문자열 명시적 해제
+                soup.decompose()
+                del soup
+                del html_content
+                del all_items
 
         except Exception as e:
             self.logger.error(f"[YOUTUBE] Unexpected error in get_list(): {e}")
@@ -107,6 +139,8 @@ class Scraper:
         finally:
             # 크롤링이 길어져 응답 시간이 초과되면 504 발생 가능
             self.logger.info(f"[YOUTUBE] Final result count: {len(results)}")
+            # 가비지 컬렉터 강제 실행하여 메모리 단편화 및 릭 방지
+            gc.collect()
 
         return results
 
