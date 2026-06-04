@@ -82,7 +82,7 @@ class Scraper:
                 # 3. 결과 페이지 로딩 대기 (고정 대기 대신 동적 대기로 시간 단축)
                 try:
                     wait.until(EC.url_contains("results"))
-                    wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "ytd-video-renderer, ytd-reel-item-renderer")))
+                    wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "ytd-video-renderer, ytd-reel-item-renderer, ytm-shorts-lockup-view-model")))
                     self.logger.info("[YOUTUBE] Search results loaded successfully")
                 except Exception as e:
                     self.logger.warning(f"[YOUTUBE] Timeout waiting for search results: {e}, continuing...")
@@ -97,7 +97,7 @@ class Scraper:
                     for _ in range(max_scrolls):
                         # 현재 렌더링된 아이템 개수 확인 (DOM 직접 조회로 Python 메모리 부하 및 통신 지연 최소화)
                         current_count = driver.execute_script(
-                            "return document.querySelectorAll('ytd-video-renderer, ytd-reel-item-renderer').length;"
+                            "return document.querySelectorAll('ytd-video-renderer, ytd-reel-item-renderer, ytm-shorts-lockup-view-model').length;"
                         )
                         if current_count >= limit:
                             self.logger.info(f"[YOUTUBE] Sufficient items loaded ({current_count} >= {limit}). Stop scrolling.")
@@ -128,7 +128,7 @@ class Scraper:
                     return results
                 
                 soup = BeautifulSoup(html_content, "html.parser")
-                all_items = soup.select("ytd-video-renderer, ytd-reel-item-renderer")
+                all_items = soup.select("ytd-video-renderer, ytd-reel-item-renderer, ytm-shorts-lockup-view-model")
 
                 self.logger.info(f"[YOUTUBE] Parsed {len(all_items)} items from search page.")
                 results = self._parse_items(driver, all_items, limit)
@@ -237,31 +237,51 @@ class Scraper:
                     "videoType": "shorts" if "shorts" in url else "video",
                 })
 
-            # 2) Shorts (ytd-reel-item-renderer)
-            elif item.name == "ytd-reel-item-renderer":
-                title_tag = item.select_one("#shorts-title")
-                if not title_tag:
-                    continue
-                title = title_tag.get_text(strip=True)
+            # 2) Shorts (ytd-reel-item-renderer & ytm-shorts-lockup-view-model)
+            elif item.name in ["ytd-reel-item-renderer", "ytm-shorts-lockup-view-model"]:
+                if item.name == "ytd-reel-item-renderer":
+                    title_tag = item.select_one("#shorts-title")
+                    if not title_tag:
+                        continue
+                    title = title_tag.get_text(strip=True)
 
-                shorts_link_tag = item.select_one("a#thumbnail")
-                if not shorts_link_tag:
-                    continue
+                    shorts_link_tag = item.select_one("a#thumbnail")
+                    if not shorts_link_tag:
+                        continue
 
-                href = shorts_link_tag.get("href", "")
-                url = f"https://www.youtube.com{href}"
+                    href = shorts_link_tag.get("href", "")
+                    url = f"https://www.youtube.com{href}"
 
-                channel_tag = item.select_one("ytd-channel-name #text")
-                channel = channel_tag.get_text(strip=True) if channel_tag else ""
+                    channel_tag = item.select_one("ytd-channel-name #text")
+                    channel = channel_tag.get_text(strip=True) if channel_tag else ""
 
-                # Shorts의 조회수/업로드 날짜는 검색결과에서 잘 안 보이므로 기본값
-                view_count, published_date = "", ""
+                    # Shorts의 조회수/업로드 날짜는 검색결과에서 잘 안 보이므로 기본값
+                    view_count, published_date = "", ""
+                else:
+                    title_tag = item.select_one("h3.shortsLockupViewModelHostMetadataTitle a")
+                    if not title_tag:
+                        continue
+                    title = title_tag.get("title", "").strip() or title_tag.get_text(strip=True)
+
+                    href = title_tag.get("href", "")
+                    if not href:
+                        shorts_link_tag = item.select_one("a.reel-item-endpoint")
+                        href = shorts_link_tag.get("href", "") if shorts_link_tag else ""
+                        
+                    url = f"https://www.youtube.com{href}"
+
+                    channel = "" # 새로운 구조에서는 채널이 잘 노출되지 않음
+
+                    view_count_tag = item.select_one(".shortsLockupViewModelHostOutsideMetadataSubhead")
+                    view_count = view_count_tag.get_text(strip=True) if view_count_tag else ""
+                    if view_count:
+                        view_count = self.get_view_count(view_count)
+                    published_date = ""
+
                 video_id = ""
                 if "shorts" in url:
-                    video_id = video_id.split("shorts/")[1]
+                    video_id = url.split("shorts/")[1].split("?")[0].split("&")[0]
 
-                # 필요 시 상세 페이지 열어서 정보 수집 가능
-                # 여기서는 예시로 생략
                 results.append({
                     "VideoID": video_id,
                     "title": title,
