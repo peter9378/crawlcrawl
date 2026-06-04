@@ -49,11 +49,11 @@ class Scraper:
                 
                 self.logger.info("[YOUTUBE] Driver obtained from pool. Page loaded.")
                 
-                # PREF 쿠키를 사용하여 한국(KR)/한국어(ko) 강제 설정
+                # PREF 쿠키를 사용하여 미국(US)/영어(en) 강제 설정
                 try:
-                    driver.add_cookie({'name': 'PREF', 'value': 'hl=ko&gl=KR', 'domain': '.youtube.com', 'path': '/'})
+                    driver.add_cookie({'name': 'PREF', 'value': 'hl=en&gl=US', 'domain': '.youtube.com', 'path': '/'})
                     driver.refresh()
-                    self.logger.info("[YOUTUBE] Cookie for KR/ko set and page refreshed.")
+                    self.logger.info("[YOUTUBE] Cookie for US/en set and page refreshed.")
                 except Exception as e:
                     self.logger.warning(f"[YOUTUBE] Failed to set cookie: {e}")
                 
