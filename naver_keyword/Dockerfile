@@ -2,6 +2,8 @@ FROM python:3.8-slim
 
 RUN apt-get update && apt-get install -yqq \
     wget \
+    curl \
+    unzip \
     build-essential \
     python3-dev \
     fonts-liberation \
@@ -30,7 +32,15 @@ RUN apt-get update && apt-get install -yqq \
     wget https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb && \
     dpkg -i google-chrome-stable_current_amd64.deb && \
     rm google-chrome-stable_current_amd64.deb && \
+    CHROME_MAJOR="$(google-chrome --version | awk '{print $3}' | cut -d. -f1)" && \
+    DRIVER_VERSION="$(curl -fsSL "https://googlechromelabs.github.io/chrome-for-testing/LATEST_RELEASE_${CHROME_MAJOR}")" && \
+    curl -fsSL "https://storage.googleapis.com/chrome-for-testing-public/${DRIVER_VERSION}/linux64/chromedriver-linux64.zip" -o /tmp/chromedriver.zip && \
+    unzip -q /tmp/chromedriver.zip -d /tmp && \
+    install -m 0755 /tmp/chromedriver-linux64/chromedriver /usr/local/bin/chromedriver && \
+    rm -rf /tmp/chromedriver.zip /tmp/chromedriver-linux64 && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
+
+ENV CHROMEDRIVER_PATH=/usr/local/bin/chromedriver
 
 WORKDIR /app
 

@@ -1,5 +1,6 @@
 from selenium import webdriver
 from selenium.webdriver import ChromeOptions
+from selenium.webdriver.chrome.service import Service
 from selenium.common.exceptions import (
     WebDriverException,
     TimeoutException,
@@ -13,6 +14,15 @@ import time
 import os
 import traceback
 import logging
+
+CHROMEDRIVER_PATH = os.environ.get('CHROMEDRIVER_PATH', '/usr/local/bin/chromedriver')
+
+
+def _chrome_service() -> Service:
+    if os.path.isfile(CHROMEDRIVER_PATH):
+        return Service(executable_path=CHROMEDRIVER_PATH)
+    return Service()
+
 
 class SeleniumDriver:
     # 페이지 로드 타임아웃 (초)
@@ -72,7 +82,7 @@ class SeleniumDriver:
         """
         try:
             self.logger.info("[SELENIUM] Initializing Chrome driver...")
-            self.driver = webdriver.Chrome(options=self.options)
+            self.driver = webdriver.Chrome(service=_chrome_service(), options=self.options)
             
             # 타임아웃 설정
             self.driver.set_page_load_timeout(self.PAGE_LOAD_TIMEOUT)
