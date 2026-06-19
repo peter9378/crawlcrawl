@@ -29,12 +29,11 @@ docker build -t naver-scraper:v2.1 .
 ### 2. 실행
 
 ```bash
-# 기본 실행 (워커 2개)
+# 기본 실행 (워커 1개 고정)
 docker run -d -p 80:80 --name scraper naver-scraper:v2.1
 
-# 워커 수 조정
+# 주의: 리소스 고갈 방지를 위해 워커 수는 1개로 고정되어 있습니다.
 docker run -d -p 80:80 \
-  -e GUNICORN_WORKERS=4 \
   --name scraper \
   naver-scraper:v2.1
 ```
@@ -82,7 +81,6 @@ curl "http://localhost/stats"
 
 | 변수 | 기본값 | 설명 |
 |------|--------|------|
-| `GUNICORN_WORKERS` | 2 | 워커 프로세스 수 |
 | `LOG_LEVEL` | info | 로그 레벨 (debug/info/warning/error) |
 
 ### 워커 수 권장 설정

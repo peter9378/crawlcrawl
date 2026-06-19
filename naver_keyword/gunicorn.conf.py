@@ -12,7 +12,7 @@ backlog = 2048
 # 워커 프로세스
 # CPU 코어 수 * 2 + 1 (권장 공식)
 # 환경변수로 오버라이드 가능
-workers = int(os.getenv("GUNICORN_WORKERS", "1"))
+workers = 1
 worker_class = "uvicorn.workers.UvicornWorker"
 worker_connections = 1000
 max_requests = 1000  # 워커당 최대 요청 수 (메모리 누수 방지)
