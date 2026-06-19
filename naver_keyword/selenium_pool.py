@@ -279,4 +279,3 @@ def cleanup_driver_pool():
     global _driver_pool
     if _driver_pool is not None:
         _driver_pool.cleanup_all()
-

@@ -68,7 +68,7 @@ echo ""
 
 # gunicorn 실행 (로컬 포트 8000 사용)
 gunicorn app:app \
-    --workers 2 \
+    --workers 1 \
     --worker-class uvicorn.workers.UvicornWorker \
     --bind 0.0.0.0:8000 \
     --max-requests 1000 \
