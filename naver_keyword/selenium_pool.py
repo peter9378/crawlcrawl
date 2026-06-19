@@ -78,9 +78,10 @@ class SeleniumDriverPool:
             try:
                 self.logger.info(f"[POOL] {thread_id}: Creating new driver (attempt {attempt+1}/{self.MAX_CREATION_RETRIES})")
                 
-                # 기본 URL은 네이버로 설정 (나중에 get()으로 변경)
-                driver = SeleniumDriver(start_url='https://www.naver.com/')
-                driver.set_up()
+                # 전역 락을 사용하여 동시에 여러 브라우저가 구동되어 CPU가 폭주하는 것을 방지
+                with self._lock:
+                    driver = SeleniumDriver(start_url='https://www.naver.com/')
+                    driver.set_up()
                 
                 if not driver.health_check():
                     raise Exception("Driver health check failed after creation")

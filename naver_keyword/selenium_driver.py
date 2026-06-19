@@ -44,6 +44,8 @@ class SeleniumDriver:
         options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36")
         options.add_argument('--window-size=300,600')
         options.add_argument('--disable-gpu')
+        options.add_argument('--disable-software-rasterizer')
+        options.add_argument('--disable-features=VizDisplayCompositor')
         options.add_argument('--no-sandbox')
         options.add_argument('--disable-sync')
         #options.add_argument('--disable-background-networking')
@@ -63,7 +65,8 @@ class SeleniumDriver:
         options.add_argument('--blink-settings=imagesEnabled=false')  # Disable images
         options.add_argument('--disable-features=SearchProviderFirstRun')
         options.add_argument('--disable-geolocation')
-        options.page_load_strategy = 'eager'  # faster DOM load
+        options.add_argument('--disable-gpu-sandbox')
+        options.page_load_strategy = 'normal'  # use normal to prevent eager rendering crashes
         
         prefs = {
             "profile.managed_default_content_settings.images": 2,  # Disable images
