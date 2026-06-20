@@ -98,10 +98,9 @@ class SeleniumDriver:
             self.logger.info("[SELENIUM] Driver initialized successfully")
             
         except TimeoutException as e:
-            error_msg = f"[SELENIUM] Timeout loading page: {e}"
-            self.logger.error(error_msg)
-            self._cleanup_driver()
-            raise WebDriverException(error_msg) from e
+            # 타임아웃이 발생해도 드라이버 객체 자체는 생성되었으므로 무시하고 계속 진행 (특히 무거운 초기 페이지 로드 시 유용)
+            self.logger.warning(f"[SELENIUM] Timeout loading initial page (ignored): {e}")
+            self.logger.info("[SELENIUM] Driver initialized despite timeout")
             
         except SessionNotCreatedException as e:
             error_msg = f"[SELENIUM] Failed to create session: {e}"
