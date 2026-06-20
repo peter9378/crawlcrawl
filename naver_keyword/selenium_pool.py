@@ -81,7 +81,7 @@ class SeleniumDriverPool:
                 
                 # 전역 락을 사용하여 동시에 여러 브라우저가 구동되어 CPU가 폭주하는 것을 방지
                 with self._lock:
-                    driver = SeleniumDriver(start_url='https://www.naver.com/')
+                    driver = SeleniumDriver(start_url='about:blank')
                     driver.set_up()
                 
                 if not driver.health_check():

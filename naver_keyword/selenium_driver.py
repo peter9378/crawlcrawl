@@ -32,7 +32,7 @@ class SeleniumDriver:
     # 암묵적 대기 시간 (초)
     IMPLICIT_WAIT = 10
     
-    def __init__(self, start_url='https://www.naver.com/'):
+    def __init__(self, start_url='about:blank'):
         self.driver = None
         self.start_url = start_url
         self.options = self._get_options()
