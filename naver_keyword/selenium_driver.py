@@ -66,7 +66,7 @@ class SeleniumDriver:
         options.add_argument('--disable-features=SearchProviderFirstRun')
         options.add_argument('--disable-geolocation')
         options.add_argument('--disable-gpu-sandbox')
-        options.page_load_strategy = 'normal'  # use normal to prevent eager rendering crashes
+        options.page_load_strategy = 'eager'  # DOMContentLoaded까지만 대기하여 타임아웃 방지
         
         prefs = {
             "profile.managed_default_content_settings.images": 2,  # Disable images

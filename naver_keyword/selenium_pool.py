@@ -7,6 +7,7 @@ import time
 import logging
 from typing import Optional
 from contextlib import contextmanager
+from selenium.common.exceptions import TimeoutException
 from selenium_driver import SeleniumDriver
 
 
@@ -206,7 +207,11 @@ class SeleniumDriverPool:
             
             # URL 로드
             self.logger.info(f"[POOL] {thread_id}: Loading URL in new tab: {url}")
-            driver.driver.get(url)
+            try:
+                driver.driver.get(url)
+            except TimeoutException as e:
+                self.logger.warning(f"[POOL] {thread_id}: Timeout loading target URL (ignored): {e}")
+                # 타임아웃이 나더라도 DOM은 대부분 렌더링된 상태이므로 무시하고 진행
             
             # 드라이버를 사용자에게 제공
             yield driver
