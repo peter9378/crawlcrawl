@@ -1,23 +1,18 @@
-import json
 import logging
 import re
 import time
 import traceback
 from datetime import datetime, timezone, timedelta
 from dateutil.relativedelta import relativedelta
+from urllib.parse import quote
 
 from bs4 import BeautifulSoup
 from selenium.webdriver.common.by import By
-from selenium.webdriver.common.keys import Keys
-from selenium.common.exceptions import (
-    TimeoutException, WebDriverException, NoSuchWindowException
-)
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.common.action_chains import ActionChains
 
 # 개선된 셀레니움 드라이버 풀 사용
-from selenium_driver import SeleniumDriver
 from selenium_pool import get_driver_pool
 
 
@@ -28,15 +23,11 @@ class Scraper:
 
     def get_suggestions(self, query: str):
         """
-        1. www.youtube.com 접속
-        2. 검색창에 query 입력 + Enter
-        3. 결과 페이지 로딩 대기
-        4. 검색창 클릭 -> List A
-        5. space 입력 -> List B
-        6. List B 뒤에 List A 차례로 붙임 (중복 제거)
+        1. YouTube 검색 결과 URL로 바로 진입
+        2. 검색창 focus로 suggestion dropdown 표시
+        3. CDP HTML snapshot을 파싱해 추천어 추출
         """
-        # 1. YouTube Home 접속
-        base_url = "https://www.youtube.com"
+        base_url = f"https://www.youtube.com/results?search_query={quote(query)}"
         final_list = []
 
         try:
@@ -47,75 +38,36 @@ class Scraper:
                 driver = driver_wrapper.driver
                 wait = WebDriverWait(driver, 10)
 
-                # 1. 페이지 로딩 대기
-                time.sleep(3)
+                time.sleep(2)
+                self.logger.info(f"[YOUTUBE] Current URL: {driver.current_url}")
 
-                # 2. 홈 화면 검색창 찾기 및 검색어 입력
+                # 검색창 focus -> suggestion list 표시
                 try:
-                    search_input_home = wait.until(
-                        EC.element_to_be_clickable((By.NAME, "search_query"))
+                    search_input = wait.until(
+                        EC.element_to_be_clickable((
+                            By.CSS_SELECTOR,
+                            'input[name="search_query"], input#search, input.ytSearchboxComponentInput'
+                        ))
                     )
-                    self.logger.info("[YOUTUBE] Found home search input")
-                    
-                    actions = ActionChains(driver)
-                    actions.move_to_element(search_input_home).click().send_keys(query).send_keys(Keys.RETURN).perform()
-                    self.logger.info(f"[YOUTUBE] Entered query '{query}' and pressed ENTER")
+                    ActionChains(driver).move_to_element(search_input).click().perform()
+                    self.logger.info("[YOUTUBE] Focused search input")
 
                 except Exception as e:
-                    self.logger.error(f"[YOUTUBE] Failed to search on home page: {e}")
+                    self.logger.error(f"[YOUTUBE] Failed to focus search input: {e}")
                     raise e
+
+                time.sleep(2)
                 
-                # 3. 결과 페이지 로딩 대기 (URL 변경 확인 등)
-                time.sleep(5) 
-                self.logger.info(f"[YOUTUBE] Current URL after search: {driver.current_url}")
-
-                # 4. 결과 페이지 검색창 찾기 및 클릭 (Focus) -> List A
-                try:
-                    # element validation via JS
-                    search_input_found = driver.execute_script("""
-                        return document.querySelector('input[name="search_query"]') || 
-                               document.querySelector('input#search') || 
-                               document.querySelector('input.ytSearchboxComponentInput');
-                    """)
-
-                    if search_input_found:
-                        actions = ActionChains(driver)
-                        actions.move_to_element(search_input_found).click().perform()
-                        self.logger.info(f"[YOUTUBE] Clicked results page search input")
-                        
-                        search_input = search_input_found 
-                    else:
-                        self.logger.warning("[YOUTUBE] Input not found via JS, trying explicit wait")
-                        search_input = wait.until(
-                            EC.element_to_be_clickable((By.NAME, "search_query"))
-                        )
-                        search_input.click()
-
-                except Exception as e:
-                    self.logger.error(f"[YOUTUBE] Failed to click results search input: {e}")
-                    # Try force focus via JS as last resort
-                    driver.execute_script("document.querySelector('input[name=\"search_query\"]').focus()")
-
-                time.sleep(2) # Wait for suggestions (List A)
-                
-                # 5. List A 추출
-                list_a = self._scrape_suggestion_texts(driver)
+                list_a = self._scrape_suggestion_texts(driver_wrapper)
                 self.logger.info(f"[YOUTUBE] List A (Focus): {list_a}")
 
-                # # 6. 스페이스바 입력 -> List B 업데이트
-                # try:
-                #     search_input.send_keys(" ")
-                # except:
-                #     driver.execute_script("arguments[0].value += ' '; arguments[0].dispatchEvent(new Event('input', { bubbles: true }));", search_input)
-                
-                # time.sleep(2) # Wait for update (List B)
+                if not list_a:
+                    self.logger.info("[YOUTUBE] No suggestions after focus, sending space once")
+                    search_input.send_keys(" ")
+                    time.sleep(1.5)
+                    list_a = self._scrape_suggestion_texts(driver_wrapper)
+                    self.logger.info(f"[YOUTUBE] List A (Space fallback): {list_a}")
 
-                # # 7. List B 추출
-                # list_b = self._scrape_suggestion_texts(driver)
-                # self.logger.info(f"[YOUTUBE] List B (Space): {list_b}")
-
-                # # 8. Merge: List B + List A (Deduplicate, keep first occurrence)
-                # combined = list_b + list_a
                 combined = list_a
 
                 # Deduplicate preserving order
@@ -150,56 +102,34 @@ class Scraper:
         return final_list
 
 
-    def _scrape_suggestion_texts(self, driver):
+    def _scrape_suggestion_texts(self, driver_wrapper):
         """
         현재 visible한 suggestion 리스트 텍스트 추출
         """
         suggestions = []
         try:
-            # Try getting texts via JS directly to avoid visibility issues
-            # We look for the text inside usually spans or divs
-            texts = driver.execute_script("""
-                var texts = [];
-                // 1. Try via aria-controls if available
-                var input = document.querySelector('input[name="search_query"]');
-                if (input && input.getAttribute('aria-controls')) {
-                    var listId = input.getAttribute('aria-controls');
-                    var listEl = document.getElementById(listId);
-                    if (listEl) {
-                        // Extract all text from list items
-                         var items = listEl.querySelectorAll('[role="option"], li');
-                         items.forEach(function(el) {
-                            var t = el.innerText.trim();
-                            if (t) texts.push(t);
-                         });
-                    }
-                }
-                
-                if (texts.length > 0) return texts;
+            html_content = driver_wrapper.get_page_source()
+            if not html_content:
+                return suggestions
 
-                // 2. Selector observed in browser: div.ytSuggestionComponentSuggestion div.ytSuggestionComponentText
-                var elements = document.querySelectorAll('div.ytSuggestionComponentSuggestion div.ytSuggestionComponentText');
-                if (elements.length == 0) {
-                    // Fallback legacy
-                    elements = document.querySelectorAll('li.sbsb_c .sbqs_c');
-                }
-                
-                elements.forEach(function(el) {
-                    var t = el.innerText.trim();
-                    if (t) texts.push(t);
-                });
-                return texts;
-            """)
-            
-            if texts:
-                return texts
-            
-            # Fallback to Selenium if JS returns nothing (maybe stale?)
-            elements = driver.find_elements(By.CSS_SELECTOR, "div.ytSuggestionComponentSuggestion div.ytSuggestionComponentText")
-            for el in elements:
-                text = el.text.strip()
-                if text:
-                    suggestions.append(text)
+            soup = BeautifulSoup(html_content, "html.parser")
+            selectors = [
+                'div.ytSuggestionComponentSuggestion div.ytSuggestionComponentText',
+                '[role="option"]',
+                'li.sbsb_c .sbqs_c',
+                'li.sbsb_c'
+            ]
+
+            seen = set()
+            for selector in selectors:
+                for element in soup.select(selector):
+                    text = " ".join(element.get_text(" ", strip=True).split())
+                    if text and text not in seen:
+                        suggestions.append(text)
+                        seen.add(text)
+
+                if suggestions:
+                    break
                     
         except Exception as e:
             self.logger.warning(f"[YOUTUBE] Error extracting suggestion texts: {e}")

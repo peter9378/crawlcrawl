@@ -4,16 +4,11 @@ from datetime import datetime
 import time
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
-import traceback
 import atexit
-
-from selenium.webdriver.common.by import By
-from selenium.webdriver.common.keys import Keys
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
+import os
 
 from scraper import Scraper
-from selenium_pool import get_driver_pool, cleanup_driver_pool
+from selenium_pool import cleanup_driver_pool
 
 app = FastAPI(
     title="YouTube Suggestion Scraper",
@@ -21,8 +16,11 @@ app = FastAPI(
     version="1.0.0"
 )
 
-# ThreadPoolExecutor 설정
-executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="scraper_worker")
+# Selenium/Chrome은 컨테이너 리소스를 크게 쓰므로 기본은 직렬 처리한다.
+executor = ThreadPoolExecutor(
+    max_workers=int(os.getenv("SCRAPER_MAX_WORKERS", "1")),
+    thread_name_prefix="scraper_worker"
+)
 
 # 로거 설정
 logging.basicConfig(
@@ -63,7 +61,7 @@ def get_suggestions_sync(keyword: str):
     scraper = Scraper()
     try:
         suggestions = scraper.get_suggestions(keyword)
-        return scraper.get_suggestions(keyword)
+        return suggestions
     except Exception as e:
         logger.error(f"[WORKER] Error in suggestion logic: {e}")
         # scraper.py 내부에서 로깅하고 있으므로 여기선 re-raise하거나 빈 리스트 반환
