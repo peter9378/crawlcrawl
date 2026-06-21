@@ -7,10 +7,6 @@ from dateutil.relativedelta import relativedelta
 from urllib.parse import quote
 
 from bs4 import BeautifulSoup
-from selenium.webdriver.common.by import By
-from selenium.webdriver.common.keys import Keys
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
 
 # 개선된 셀레니움 드라이버 풀 사용
 from selenium_pool import get_driver_pool
@@ -29,7 +25,6 @@ class Scraper:
         if not query:
             return self._build_suggestion_response(query, [])
 
-        home_url = "https://www.youtube.com"
         results_url = f"https://www.youtube.com/results?search_query={quote(query)}"
         suggestions = []
 
@@ -39,13 +34,9 @@ class Scraper:
 
             with pool.get_driver("about:blank") as driver_wrapper:
                 driver = driver_wrapper.driver
-                self._set_korean_locale(driver_wrapper)
+                self._set_korean_locale_cookie(driver)
+                driver_wrapper.load_url(results_url)
 
-                if not self._submit_search_from_home(driver_wrapper, query):
-                    self.logger.warning("[YOUTUBE] Home search failed, loading results URL directly")
-                    driver_wrapper.load_url(results_url)
-
-                self._wait_for_results_page(driver_wrapper, results_url)
                 self.logger.info(f"[YOUTUBE] Current URL after search: {driver.current_url}")
 
                 if self._open_search_suggestions(driver_wrapper):
@@ -56,7 +47,10 @@ class Scraper:
                     list_b = self._wait_for_suggestions(driver_wrapper)
                     self.logger.info(f"[YOUTUBE] List B (Space): {list_b}")
 
-                    suggestions = self._dedupe_suggestions(list_b + list_a)
+                    suggestions = self._expand_ellipsis_suggestions(
+                        self._dedupe_suggestions(list_b + list_a),
+                        query
+                    )
 
                 if not suggestions:
                     self.logger.warning("[YOUTUBE] No suggestion dropdown found on youtube.com page")
@@ -70,8 +64,7 @@ class Scraper:
             self.logger.error(traceback.format_exc())
             return self._build_suggestion_response(query, [])
 
-    def _set_korean_locale(self, driver_wrapper):
-        driver = driver_wrapper.driver
+    def _set_korean_locale_cookie(self, driver):
         try:
             driver.execute_cdp_cmd("Network.setCookie", {
                 "name": "PREF",
@@ -80,76 +73,9 @@ class Scraper:
                 "path": "/",
                 "url": "https://www.youtube.com/",
             })
-            driver_wrapper.load_url("https://www.youtube.com")
-            self.logger.info("[YOUTUBE] Cookie for KR/ko set via CDP and home page loaded")
+            self.logger.info("[YOUTUBE] Cookie for KR/ko set via CDP")
         except Exception as e:
             self.logger.warning(f"[YOUTUBE] Failed to set KR/ko cookie via CDP: {e}")
-            driver_wrapper.load_url("https://www.youtube.com")
-
-    def _submit_search_from_home(self, driver_wrapper, query: str) -> bool:
-        driver = driver_wrapper.driver
-        try:
-            wait = WebDriverWait(driver, 10)
-            search_input = wait.until(
-                EC.element_to_be_clickable((By.NAME, "search_query"))
-            )
-            self.logger.info("[YOUTUBE] Found home search input")
-
-            driver.execute_script(
-                "arguments[0].value = arguments[1]; "
-                "arguments[0].dispatchEvent(new Event('input', { bubbles: true })); "
-                "arguments[0].dispatchEvent(new Event('change', { bubbles: true })); "
-                "arguments[0].focus();",
-                search_input,
-                query
-            )
-            search_input.send_keys(Keys.RETURN)
-            self.logger.info(f"[YOUTUBE] Entered query '{query}' and pressed ENTER")
-            return True
-
-        except Exception as webdriver_error:
-            self.logger.warning(f"[YOUTUBE] WebDriver home search failed, trying JS fallback: {webdriver_error}")
-
-        try:
-            found = self._run_search_input_script_until(
-                driver,
-                """
-                input.value = arguments[0];
-                input.dispatchEvent(new Event('input', { bubbles: true }));
-                input.dispatchEvent(new Event('change', { bubbles: true }));
-                input.focus();
-                return input.outerHTML;
-                """,
-                query,
-                timeout=12
-            )
-            if not found:
-                self.logger.warning("[YOUTUBE] Home search input not found")
-                return False
-
-            self.logger.info(f"[YOUTUBE] Found home input via JS: {found[:200]}")
-            self._press_enter(driver)
-            return True
-
-        except Exception as e:
-            self.logger.warning(f"[YOUTUBE] Failed to submit home search via JS: {e}")
-            return False
-
-    def _wait_for_results_page(self, driver_wrapper, fallback_url: str):
-        driver = driver_wrapper.driver
-        deadline = time.monotonic() + 12
-        while time.monotonic() < deadline:
-            try:
-                if "youtube.com/results" in driver.current_url:
-                    time.sleep(1.0)
-                    return
-            except Exception:
-                pass
-            time.sleep(0.25)
-
-        self.logger.warning("[YOUTUBE] Search did not navigate to results in time; loading fallback URL")
-        driver_wrapper.load_url(fallback_url)
-        time.sleep(1.0)
 
     def _open_search_suggestions(self, driver_wrapper) -> bool:
         driver = driver_wrapper.driver
@@ -227,16 +153,6 @@ class Scraper:
         if (!input) return null;
         {body}
         """
-
-    def _press_enter(self, driver):
-        for event_type in ("keyDown", "keyUp"):
-            driver.execute_cdp_cmd("Input.dispatchKeyEvent", {
-                "type": event_type,
-                "key": "Enter",
-                "code": "Enter",
-                "windowsVirtualKeyCode": 13,
-                "nativeVirtualKeyCode": 13,
-            })
 
     def _focus_search_input_with_cdp(self, driver_wrapper) -> bool:
         """JS focus가 실패할 때 CDP DOM/Mouse event로 검색창을 focus한다."""
@@ -357,6 +273,23 @@ class Scraper:
                     result.append(text)
                     seen.add(text)
         return result
+
+    def _expand_ellipsis_suggestions(self, suggestions, query: str):
+        result = []
+        query_parts = query.split()
+        query_prefix = " ".join(query_parts[:-1])
+        query_last = query_parts[-1].lower() if query_parts else ""
+
+        for suggestion in suggestions:
+            text = suggestion.strip()
+            if text.startswith("...") or text.startswith("\u2026"):
+                suffix = text[3:].strip() if text.startswith("...") else text[1:].strip()
+                if suffix and query_last and suffix.lower().startswith(query_last):
+                    text = f"{query_prefix} {suffix}".strip()
+                else:
+                    text = f"{query} {suffix}".strip() if suffix else query
+            result.append(text)
+        return self._dedupe_suggestions(result)
 
     def _build_suggestion_response(self, query: str, suggestions):
         return {

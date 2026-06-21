@@ -30,6 +30,7 @@ class SeleniumDriver:
     DOCUMENT_READY_TIMEOUT = float(os.environ.get('SELENIUM_DOCUMENT_READY_TIMEOUT', '10'))
     # URL 전환 후 동적 DOM이 채워질 최소 대기 시간 (초)
     PAGE_STABILIZE_DELAY = float(os.environ.get('SELENIUM_PAGE_STABILIZE_DELAY', '2.5'))
+    YOUTUBE_PAGE_STABILIZE_DELAY = float(os.environ.get('SELENIUM_YOUTUBE_PAGE_STABILIZE_DELAY', '1.0'))
     # YouTube SPA hydration을 위해 기본적으로 페이지 로딩을 강제 중단하지 않는다.
     STOP_LOADING_AFTER_NAVIGATE = os.environ.get('SELENIUM_STOP_LOADING_AFTER_NAVIGATE', 'false').lower() == 'true'
     # YouTube는 DOM.getOuterHTML이 renderer/network 상태에 묶여 길게 block될 수 있어 URL 기반 검증을 기본 사용한다.
@@ -37,7 +38,7 @@ class SeleniumDriver:
     # 빈 문서로 간주할 최소 HTML 길이
     MIN_PAGE_SOURCE_LENGTH = 100
     # 암묵적 대기 시간 (초)
-    IMPLICIT_WAIT = 10
+    IMPLICIT_WAIT = float(os.environ.get('SELENIUM_IMPLICIT_WAIT', '0'))
     
     def __init__(self, start_url='about:blank'):
         self.driver = None
@@ -221,7 +222,7 @@ class SeleniumDriver:
             self.logger.info(f"[SELENIUM] Loading target URL: {url}")
             self._navigate_with_cdp(url)
             self._wait_for_document_ready(url)
-            time.sleep(self.PAGE_STABILIZE_DELAY)
+            time.sleep(self.YOUTUBE_PAGE_STABILIZE_DELAY if self._should_fast_validate(url) else self.PAGE_STABILIZE_DELAY)
             if self.STOP_LOADING_AFTER_NAVIGATE:
                 self._stop_loading()
             if self._should_fast_validate(url):
@@ -241,11 +242,21 @@ class SeleniumDriver:
             raise
 
     def _navigate_with_cdp(self, url: str):
-        """일반 driver.get 대기 대신 CDP navigation으로 빠르게 전환합니다."""
+        """URL로 이동합니다. YouTube는 page_load_strategy=none의 driver.get을 우선 사용합니다."""
         try:
+            if self._should_fast_validate(url):
+                self.driver.get(url)
+                return
+
             self.driver.execute_cdp_cmd("Page.navigate", {"url": url})
+        except TimeoutException as e:
+            if self._should_fast_validate(url):
+                self.logger.warning(f"[SELENIUM] YouTube navigation timed out; continuing after stopLoading: {e}")
+                self._stop_loading()
+                return
+            raise
         except WebDriverException as e:
-            error_msg = f"[SELENIUM] CDP navigation failed for {url}: {e}"
+            error_msg = f"[SELENIUM] Navigation failed for {url}: {e}"
             self.logger.warning(error_msg)
             raise WebDriverException(error_msg) from e
 
