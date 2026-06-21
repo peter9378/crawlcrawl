@@ -73,6 +73,7 @@ async def search_suggestions(keyword: str):
     Search suggestions for a given keyword.
     Example: /search/suggestions?keyword=속건조
     """
+    keyword = (keyword or "").strip()
     if not keyword:
         raise HTTPException(status_code=400, detail="Keyword is required")
         

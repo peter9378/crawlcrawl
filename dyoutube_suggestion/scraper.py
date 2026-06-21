@@ -1,4 +1,5 @@
 import logging
+import os
 import re
 import time
 import traceback
@@ -6,101 +7,98 @@ from datetime import datetime, timezone, timedelta
 from dateutil.relativedelta import relativedelta
 from urllib.parse import quote
 
+import requests
 from bs4 import BeautifulSoup
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.webdriver.common.action_chains import ActionChains
 
 # 개선된 셀레니움 드라이버 풀 사용
 from selenium_pool import get_driver_pool
 
 
 class Scraper:
+    SUGGEST_ENDPOINT = os.getenv(
+        "YOUTUBE_SUGGEST_ENDPOINT",
+        "https://suggestqueries.google.com/complete/search"
+    )
+    SUGGEST_TIMEOUT = float(os.getenv("YOUTUBE_SUGGEST_TIMEOUT", "8"))
+    SUGGEST_HL = os.getenv("YOUTUBE_SUGGEST_HL", "ko")
+    SUGGEST_GL = os.getenv("YOUTUBE_SUGGEST_GL", "KR")
+
     def __init__(self):
         # FastAPI 기반 uvicorn 로거 사용 가정
         self.logger = logging.getLogger("uvicorn")
 
     def get_suggestions(self, query: str):
         """
-        1. YouTube 검색 결과 URL로 바로 진입
-        2. 검색창 focus로 suggestion dropdown 표시
-        3. CDP HTML snapshot을 파싱해 추천어 추출
+        YouTube 추천 검색어를 autocomplete endpoint에서 직접 조회한다.
+        UI 렌더링이나 검색창 focus에 의존하지 않아 컨테이너 Chrome timeout 영향을 받지 않는다.
         """
-        base_url = f"https://www.youtube.com/results?search_query={quote(query)}"
-        final_list = []
+        query = (query or "").strip()
+        if not query:
+            return self._build_suggestion_response(query, [])
 
         try:
-            self.logger.info(f"[YOUTUBE] Starting search flow for: {query}")
-            pool = get_driver_pool()
-
-            with pool.get_driver(base_url) as driver_wrapper:
-                driver = driver_wrapper.driver
-                wait = WebDriverWait(driver, 10)
-
-                time.sleep(2)
-                self.logger.info(f"[YOUTUBE] Current URL: {driver.current_url}")
-
-                # 검색창 focus -> suggestion list 표시
-                try:
-                    search_input = wait.until(
-                        EC.element_to_be_clickable((
-                            By.CSS_SELECTOR,
-                            'input[name="search_query"], input#search, input.ytSearchboxComponentInput'
-                        ))
-                    )
-                    ActionChains(driver).move_to_element(search_input).click().perform()
-                    self.logger.info("[YOUTUBE] Focused search input")
-
-                except Exception as e:
-                    self.logger.error(f"[YOUTUBE] Failed to focus search input: {e}")
-                    raise e
-
-                time.sleep(2)
-                
-                list_a = self._scrape_suggestion_texts(driver_wrapper)
-                self.logger.info(f"[YOUTUBE] List A (Focus): {list_a}")
-
-                if not list_a:
-                    self.logger.info("[YOUTUBE] No suggestions after focus, sending space once")
-                    search_input.send_keys(" ")
-                    time.sleep(1.5)
-                    list_a = self._scrape_suggestion_texts(driver_wrapper)
-                    self.logger.info(f"[YOUTUBE] List A (Space fallback): {list_a}")
-
-                combined = list_a
-
-                # Deduplicate preserving order
-                seen = set()
-                rank = 1
-                result_list = []
-                for item in combined:
-                    if item not in seen:
-                        result_list.append({
-                            "rank": rank,
-                            "query": item
-                        })
-                        seen.add(item)
-                        rank += 1
-                
-                final_list = {
-                    "keyword": query,
-                    "result": result_list
-                }
-                
-                self.logger.info(f"[YOUTUBE] Final Combined Unique: {final_list}")
+            self.logger.info(f"[YOUTUBE] Fetching suggestions via HTTP for: {query}")
+            suggestions = self._fetch_suggestions_http(query)
+            result = self._build_suggestion_response(query, suggestions)
+            self.logger.info(f"[YOUTUBE] Suggestions result: {result}")
+            return result
 
         except Exception as e:
             self.logger.error(f"[YOUTUBE] Error in get_suggestions: {e}")
             self.logger.error(traceback.format_exc())
-            # 에러 발생 시에도 기본 구조는 반환하도록 함 (빈 리스트)
-            final_list = {
-                "keyword": query,
-                "result": []
-            }
+            return self._build_suggestion_response(query, [])
 
-        return final_list
+    def _fetch_suggestions_http(self, query: str):
+        params = {
+            "client": "firefox",
+            "ds": "yt",
+            "q": query,
+            "hl": self.SUGGEST_HL,
+            "gl": self.SUGGEST_GL,
+        }
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/125.0.0.0 Safari/537.36"
+            ),
+            "Accept": "application/json,text/plain,*/*",
+            "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
+        }
 
+        response = requests.get(
+            self.SUGGEST_ENDPOINT,
+            params=params,
+            headers=headers,
+            timeout=self.SUGGEST_TIMEOUT,
+        )
+        response.raise_for_status()
+
+        payload = response.json()
+        raw_suggestions = payload[1] if isinstance(payload, list) and len(payload) > 1 else []
+
+        suggestions = []
+        seen = set()
+        for item in raw_suggestions:
+            text = item[0] if isinstance(item, list) and item else item
+            text = " ".join(str(text).split())
+            if text and text not in seen:
+                suggestions.append(text)
+                seen.add(text)
+
+        return suggestions
+
+    def _build_suggestion_response(self, query: str, suggestions):
+        return {
+            "keyword": query,
+            "result": [
+                {
+                    "rank": index + 1,
+                    "query": suggestion
+                }
+                for index, suggestion in enumerate(suggestions)
+            ]
+        }
 
     def _scrape_suggestion_texts(self, driver_wrapper):
         """
@@ -143,7 +141,7 @@ class Scraper:
         최대 limit개의 동영상 정보를 리스트 형태로 반환.
         드라이버 풀을 사용하여 성능을 개선합니다.
         """
-        base_url = f"https://www.youtube.com/results?search_query={query}"
+        base_url = f"https://www.youtube.com/results?search_query={quote(query)}"
         results = []
 
         try:

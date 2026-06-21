@@ -33,7 +33,7 @@ def test_api():
         
         if response.status_code == 200:
             data = response.json()
-            suggestions = data.get("suggestions", [])
+            suggestions = data.get("result", [])
             print(f"Suggestions count: {len(suggestions)}")
             print(f"Suggestions: {suggestions}")
             if len(suggestions) > 0:
