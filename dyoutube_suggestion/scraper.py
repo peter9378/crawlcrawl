@@ -1,5 +1,4 @@
 import logging
-import os
 import re
 import time
 import traceback
@@ -7,7 +6,6 @@ from datetime import datetime, timezone, timedelta
 from dateutil.relativedelta import relativedelta
 from urllib.parse import quote
 
-import requests
 from bs4 import BeautifulSoup
 
 # 개선된 셀레니움 드라이버 풀 사용
@@ -15,32 +13,45 @@ from selenium_pool import get_driver_pool
 
 
 class Scraper:
-    SUGGEST_ENDPOINT = os.getenv(
-        "YOUTUBE_SUGGEST_ENDPOINT",
-        "https://suggestqueries.google.com/complete/search"
-    )
-    SUGGEST_TIMEOUT = float(os.getenv("YOUTUBE_SUGGEST_TIMEOUT", "8"))
-    SUGGEST_HL = os.getenv("YOUTUBE_SUGGEST_HL", "ko")
-    SUGGEST_GL = os.getenv("YOUTUBE_SUGGEST_GL", "KR")
-
     def __init__(self):
         # FastAPI 기반 uvicorn 로거 사용 가정
         self.logger = logging.getLogger("uvicorn")
 
     def get_suggestions(self, query: str):
         """
-        YouTube 추천 검색어를 autocomplete endpoint에서 직접 조회한다.
-        UI 렌더링이나 검색창 focus에 의존하지 않아 컨테이너 Chrome timeout 영향을 받지 않는다.
+        www.youtube.com 검색 결과 페이지에서 검색창을 focus한 뒤 노출되는 추천어를 크롤링한다.
         """
         query = (query or "").strip()
         if not query:
             return self._build_suggestion_response(query, [])
 
+        base_url = f"https://www.youtube.com/results?search_query={quote(query)}"
+        suggestions = []
+
         try:
-            self.logger.info(f"[YOUTUBE] Fetching suggestions via HTTP for: {query}")
-            suggestions = self._fetch_suggestions_http(query)
+            self.logger.info(f"[YOUTUBE] Starting youtube.com suggestion crawl for: {query}")
+            pool = get_driver_pool()
+
+            with pool.get_driver(base_url) as driver_wrapper:
+                driver = driver_wrapper.driver
+                self.logger.info(f"[YOUTUBE] Current URL: {driver.current_url}")
+
+                if self._focus_search_input_with_cdp(driver_wrapper):
+                    time.sleep(1.5)
+                    suggestions = self._scrape_suggestion_texts(driver_wrapper)
+                    self.logger.info(f"[YOUTUBE] Suggestions after focus: {suggestions}")
+
+                    if not suggestions:
+                        self._refresh_suggestions_with_keyboard(driver_wrapper)
+                        time.sleep(1.5)
+                        suggestions = self._scrape_suggestion_texts(driver_wrapper)
+                        self.logger.info(f"[YOUTUBE] Suggestions after keyboard refresh: {suggestions}")
+
+                if not suggestions:
+                    self.logger.warning("[YOUTUBE] No suggestion dropdown found on youtube.com page")
+
             result = self._build_suggestion_response(query, suggestions)
-            self.logger.info(f"[YOUTUBE] Suggestions result: {result}")
+            self.logger.info(f"[YOUTUBE] Final suggestion result: {result}")
             return result
 
         except Exception as e:
@@ -48,45 +59,102 @@ class Scraper:
             self.logger.error(traceback.format_exc())
             return self._build_suggestion_response(query, [])
 
-    def _fetch_suggestions_http(self, query: str):
-        params = {
-            "client": "firefox",
-            "ds": "yt",
-            "q": query,
-            "hl": self.SUGGEST_HL,
-            "gl": self.SUGGEST_GL,
-        }
-        headers = {
-            "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/125.0.0.0 Safari/537.36"
-            ),
-            "Accept": "application/json,text/plain,*/*",
-            "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
-        }
+    def _focus_search_input_with_cdp(self, driver_wrapper) -> bool:
+        """Selenium clickable wait 대신 CDP DOM/Mouse event로 검색창을 focus한다."""
+        driver = driver_wrapper.driver
+        selectors = [
+            'input[name="search_query"]',
+            'input#search',
+            'input.ytSearchboxComponentInput',
+        ]
 
-        response = requests.get(
-            self.SUGGEST_ENDPOINT,
-            params=params,
-            headers=headers,
-            timeout=self.SUGGEST_TIMEOUT,
-        )
-        response.raise_for_status()
+        try:
+            document = driver.execute_cdp_cmd("DOM.getDocument", {
+                "depth": 0,
+                "pierce": True
+            })
+            root_id = document.get("root", {}).get("nodeId")
+            if not root_id:
+                self.logger.warning("[YOUTUBE] Could not get document root node")
+                return False
 
-        payload = response.json()
-        raw_suggestions = payload[1] if isinstance(payload, list) and len(payload) > 1 else []
+            for selector in selectors:
+                node = driver.execute_cdp_cmd("DOM.querySelector", {
+                    "nodeId": root_id,
+                    "selector": selector
+                })
+                node_id = node.get("nodeId")
+                if not node_id:
+                    continue
 
-        suggestions = []
-        seen = set()
-        for item in raw_suggestions:
-            text = item[0] if isinstance(item, list) and item else item
-            text = " ".join(str(text).split())
-            if text and text not in seen:
-                suggestions.append(text)
-                seen.add(text)
+                try:
+                    driver.execute_cdp_cmd("DOM.scrollIntoViewIfNeeded", {
+                        "nodeId": node_id
+                    })
+                except Exception:
+                    pass
 
-        return suggestions
+                driver.execute_cdp_cmd("DOM.focus", {"nodeId": node_id})
+                try:
+                    self._click_node_center(driver, node_id)
+                except Exception as e:
+                    self.logger.warning(f"[YOUTUBE] Search input click failed after focus: {e}")
+                self.logger.info(f"[YOUTUBE] Focused search input via CDP: {selector}")
+                return True
+
+            self.logger.warning("[YOUTUBE] Search input node was not found")
+            return False
+
+        except Exception as e:
+            self.logger.warning(f"[YOUTUBE] Failed to focus search input via CDP: {e}")
+            return False
+
+    def _click_node_center(self, driver, node_id: int):
+        box = driver.execute_cdp_cmd("DOM.getBoxModel", {"nodeId": node_id})
+        content = box.get("model", {}).get("content", [])
+        if len(content) < 8:
+            return
+
+        xs = content[0::2]
+        ys = content[1::2]
+        x = sum(xs) / len(xs)
+        y = sum(ys) / len(ys)
+
+        for event_type in ("mouseMoved", "mousePressed", "mouseReleased"):
+            payload = {
+                "type": event_type,
+                "x": x,
+                "y": y,
+                "button": "left",
+                "clickCount": 1,
+            }
+            if event_type == "mousePressed":
+                payload["buttons"] = 1
+            driver.execute_cdp_cmd("Input.dispatchMouseEvent", payload)
+
+    def _refresh_suggestions_with_keyboard(self, driver_wrapper):
+        """focus된 검색창에 입력 이벤트를 만들어 suggestion dropdown을 다시 열도록 유도한다."""
+        driver = driver_wrapper.driver
+        try:
+            driver.execute_cdp_cmd("Input.insertText", {"text": " "})
+            time.sleep(0.2)
+            driver.execute_cdp_cmd("Input.dispatchKeyEvent", {
+                "type": "keyDown",
+                "key": "Backspace",
+                "code": "Backspace",
+                "windowsVirtualKeyCode": 8,
+                "nativeVirtualKeyCode": 8,
+            })
+            driver.execute_cdp_cmd("Input.dispatchKeyEvent", {
+                "type": "keyUp",
+                "key": "Backspace",
+                "code": "Backspace",
+                "windowsVirtualKeyCode": 8,
+                "nativeVirtualKeyCode": 8,
+            })
+            self.logger.info("[YOUTUBE] Dispatched keyboard refresh for suggestions")
+        except Exception as e:
+            self.logger.warning(f"[YOUTUBE] Failed to refresh suggestions with keyboard: {e}")
 
     def _build_suggestion_response(self, query: str, suggestions):
         return {

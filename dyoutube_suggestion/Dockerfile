@@ -57,4 +57,3 @@ RUN pip install --upgrade pip && \
 # - max-requests: 1000 (메모리 누수 방지를 위한 자동 워커 재시작)
 # - timeout: 120초 (Selenium 작업을 위한 긴 타임아웃)
 CMD ["gunicorn", "app:app", "-c", "gunicorn.conf.py"]
-
