@@ -215,7 +215,7 @@ class SeleniumDriverPool:
             try:
                 if driver and driver.driver:
                     self.logger.debug(f"[POOL] {thread_id}: Navigating to about:blank for cleanup")
-                    driver.driver.get("about:blank")
+                    driver.reset_to_blank()
             except Exception as e:
                 self.logger.warning(f"[POOL] {thread_id}: Error cleaning up page: {e}")
                 # 정리 실패 시 다음 요청에서 드라이버 재시작
