@@ -65,17 +65,30 @@ class Scraper:
             return self._build_suggestion_response(query, [])
 
     def _set_korean_locale_cookie(self, driver):
-        try:
-            driver.execute_cdp_cmd("Network.setCookie", {
+        cookies = [
+            {
                 "name": "PREF",
                 "value": "hl=ko&gl=KR",
                 "domain": ".youtube.com",
                 "path": "/",
                 "url": "https://www.youtube.com/",
-            })
-            self.logger.info("[YOUTUBE] Cookie for KR/ko set via CDP")
-        except Exception as e:
-            self.logger.warning(f"[YOUTUBE] Failed to set KR/ko cookie via CDP: {e}")
+            },
+            {
+                "name": "CONSENT",
+                "value": "YES+cb",
+                "domain": ".youtube.com",
+                "path": "/",
+                "url": "https://www.youtube.com/",
+            },
+        ]
+
+        for cookie in cookies:
+            try:
+                driver.execute_cdp_cmd("Network.setCookie", cookie)
+            except Exception as e:
+                self.logger.warning(f"[YOUTUBE] Failed to set cookie {cookie['name']} via CDP: {e}")
+
+        self.logger.info("[YOUTUBE] Locale/consent cookies set via CDP")
 
     def _open_search_suggestions(self, driver_wrapper) -> bool:
         driver = driver_wrapper.driver
@@ -95,11 +108,11 @@ class Scraper:
                 input.dispatchEvent(new Event('input', { bubbles: true }));
                 return input.outerHTML;
                 """,
-                timeout=12
+                timeout=6
             )
             if not found:
                 self.logger.warning("[YOUTUBE] Search input was not found via JS")
-                return self._focus_search_input_with_cdp(driver_wrapper)
+                return False
 
             self.logger.info(f"[YOUTUBE] Found input via JS: {found[:200]}")
             active = driver.execute_script(
@@ -114,7 +127,7 @@ class Scraper:
 
         except Exception as e:
             self.logger.warning(f"[YOUTUBE] Failed to open suggestions via JS: {e}")
-            return self._focus_search_input_with_cdp(driver_wrapper)
+            return False
 
     def _run_search_input_script_until(self, driver, body: str, *args, timeout: float = 10):
         deadline = time.monotonic() + timeout
@@ -130,7 +143,7 @@ class Scraper:
             time.sleep(0.5)
 
         if last_error:
-            self.logger.warning(f"[YOUTUBE] Search input JS wait ended with error: {last_error}")
+            self.logger.debug(f"[YOUTUBE] Search input JS wait ended without usable input: {type(last_error).__name__}")
         return None
 
     def _search_input_script(self, body: str) -> str:
@@ -153,79 +166,6 @@ class Scraper:
         if (!input) return null;
         {body}
         """
-
-    def _focus_search_input_with_cdp(self, driver_wrapper) -> bool:
-        """JS focus가 실패할 때 CDP DOM/Mouse event로 검색창을 focus한다."""
-        driver = driver_wrapper.driver
-        selectors = [
-            'input[name="search_query"]',
-            'input#search',
-            'input.ytSearchboxComponentInput',
-        ]
-
-        try:
-            document = driver.execute_cdp_cmd("DOM.getDocument", {
-                "depth": 0,
-                "pierce": True
-            })
-            root_id = document.get("root", {}).get("nodeId")
-            if not root_id:
-                self.logger.warning("[YOUTUBE] Could not get document root node")
-                return False
-
-            for selector in selectors:
-                node = driver.execute_cdp_cmd("DOM.querySelector", {
-                    "nodeId": root_id,
-                    "selector": selector
-                })
-                node_id = node.get("nodeId")
-                if not node_id:
-                    continue
-
-                try:
-                    driver.execute_cdp_cmd("DOM.scrollIntoViewIfNeeded", {
-                        "nodeId": node_id
-                    })
-                except Exception:
-                    pass
-
-                driver.execute_cdp_cmd("DOM.focus", {"nodeId": node_id})
-                try:
-                    self._click_node_center(driver, node_id)
-                except Exception as e:
-                    self.logger.warning(f"[YOUTUBE] Search input click failed after focus: {e}")
-                self.logger.info(f"[YOUTUBE] Focused search input via CDP: {selector}")
-                return True
-
-            self.logger.warning("[YOUTUBE] Search input node was not found")
-            return False
-
-        except Exception as e:
-            self.logger.warning(f"[YOUTUBE] Failed to focus search input via CDP: {e}")
-            return False
-
-    def _click_node_center(self, driver, node_id: int):
-        box = driver.execute_cdp_cmd("DOM.getBoxModel", {"nodeId": node_id})
-        content = box.get("model", {}).get("content", [])
-        if len(content) < 8:
-            return
-
-        xs = content[0::2]
-        ys = content[1::2]
-        x = sum(xs) / len(xs)
-        y = sum(ys) / len(ys)
-
-        for event_type in ("mouseMoved", "mousePressed", "mouseReleased"):
-            payload = {
-                "type": event_type,
-                "x": x,
-                "y": y,
-                "button": "left",
-                "clickCount": 1,
-            }
-            if event_type == "mousePressed":
-                payload["buttons"] = 1
-            driver.execute_cdp_cmd("Input.dispatchMouseEvent", payload)
 
     def _refresh_suggestions_with_keyboard(self, driver_wrapper):
         """focus된 검색창에 입력 이벤트를 만들어 suggestion dropdown을 다시 열도록 유도한다."""
@@ -251,7 +191,7 @@ class Scraper:
         except Exception as e:
             self.logger.warning(f"[YOUTUBE] Failed to refresh suggestions with keyboard: {e}")
 
-    def _wait_for_suggestions(self, driver_wrapper, timeout: float = 6):
+    def _wait_for_suggestions(self, driver_wrapper, timeout: float = 3):
         deadline = time.monotonic() + timeout
         last_result = []
 

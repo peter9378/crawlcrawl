@@ -23,11 +23,12 @@ def _chrome_service() -> Service:
 
 class SeleniumDriver:
     # 페이지 로드 타임아웃 (초)
-    PAGE_LOAD_TIMEOUT = int(os.environ.get('SELENIUM_PAGE_LOAD_TIMEOUT', '20'))
+    PAGE_LOAD_TIMEOUT = int(os.environ.get('SELENIUM_PAGE_LOAD_TIMEOUT', '8'))
     # 스크립트 실행 타임아웃 (초)
-    SCRIPT_TIMEOUT = int(os.environ.get('SELENIUM_SCRIPT_TIMEOUT', '5'))
+    SCRIPT_TIMEOUT = int(os.environ.get('SELENIUM_SCRIPT_TIMEOUT', '2'))
     # 명시적 페이지 준비 대기 시간 (초)
     DOCUMENT_READY_TIMEOUT = float(os.environ.get('SELENIUM_DOCUMENT_READY_TIMEOUT', '10'))
+    YOUTUBE_DOCUMENT_READY_TIMEOUT = float(os.environ.get('SELENIUM_YOUTUBE_DOCUMENT_READY_TIMEOUT', '4'))
     # URL 전환 후 동적 DOM이 채워질 최소 대기 시간 (초)
     PAGE_STABILIZE_DELAY = float(os.environ.get('SELENIUM_PAGE_STABILIZE_DELAY', '2.5'))
     YOUTUBE_PAGE_STABILIZE_DELAY = float(os.environ.get('SELENIUM_YOUTUBE_PAGE_STABILIZE_DELAY', '1.0'))
@@ -242,10 +243,10 @@ class SeleniumDriver:
             raise
 
     def _navigate_with_cdp(self, url: str):
-        """URL로 이동합니다. YouTube는 page_load_strategy=none의 driver.get을 우선 사용합니다."""
+        """URL로 이동합니다. YouTube는 renderer가 오래 붙잡히지 않도록 location 변경만 시작합니다."""
         try:
             if self._should_fast_validate(url):
-                self.driver.get(url)
+                self.driver.execute_script("window.location.href = arguments[0];", url)
                 return
 
             self.driver.execute_cdp_cmd("Page.navigate", {"url": url})
@@ -262,7 +263,8 @@ class SeleniumDriver:
 
     def _wait_for_document_ready(self, url: str):
         """JS 실행 없이 URL이 실제 페이지로 전환될 때까지 대기"""
-        deadline = time.monotonic() + self.DOCUMENT_READY_TIMEOUT
+        timeout = self.YOUTUBE_DOCUMENT_READY_TIMEOUT if self._should_fast_validate(url) else self.DOCUMENT_READY_TIMEOUT
+        deadline = time.monotonic() + timeout
         last_url = "unavailable"
 
         while time.monotonic() < deadline:
