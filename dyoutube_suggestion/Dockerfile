@@ -1,6 +1,7 @@
-# GCP Rocky Linux - Selenium + system Google Chrome
+# GCP Rocky Linux - Playwright + system Google Chrome
 FROM rockylinux:9
 
+ARG TARGETARCH
 ENV DEBIAN_FRONTEND=noninteractive
 
 # GCP/container DNS and IPv6 timeout mitigation.
@@ -18,7 +19,6 @@ RUN echo "ip_resolve=4" >> /etc/dnf/dnf.conf && \
         gcc \
         glibc-langpack-ko \
         wget \
-        unzip \
         xorg-x11-server-Xvfb \
         alsa-lib \
         atk \
@@ -42,21 +42,21 @@ RUN echo "ip_resolve=4" >> /etc/dnf/dnf.conf && \
         xdg-utils \
     && dnf clean all
 
-# Chrome and matching Chromedriver. Use IPv4 during build to avoid resolver flakiness.
-RUN wget -q --inet4-only https://dl.google.com/linux/direct/google-chrome-stable_current_x86_64.rpm \
+# System Chrome for Playwright. Use IPv4 during build to avoid resolver flakiness.
+RUN if [ "$TARGETARCH" != "amd64" ]; then \
+        echo "google-chrome-stable RPM supports amd64 only; build with --platform linux/amd64"; \
+        exit 1; \
+    fi && \
+    wget -q --inet4-only https://dl.google.com/linux/direct/google-chrome-stable_current_x86_64.rpm \
         -O /tmp/chrome.rpm && \
     dnf install -y --allowerasing /tmp/chrome.rpm && \
     rm -f /tmp/chrome.rpm && \
-    ln -sf /opt/google/chrome/google-chrome /usr/bin/google-chrome 2>/dev/null || true && \
-    CHROME_MAJOR="$(google-chrome --version | awk '{print $3}' | cut -d. -f1)" && \
-    DRIVER_VERSION="$(wget --inet4-only -qO- "https://googlechromelabs.github.io/chrome-for-testing/LATEST_RELEASE_${CHROME_MAJOR}")" && \
-    wget --inet4-only -q "https://storage.googleapis.com/chrome-for-testing-public/${DRIVER_VERSION}/linux64/chromedriver-linux64.zip" \
-        -O /tmp/chromedriver.zip && \
-    unzip -q /tmp/chromedriver.zip -d /tmp && \
-    install -m 0755 /tmp/chromedriver-linux64/chromedriver /usr/local/bin/chromedriver && \
-    rm -rf /tmp/chromedriver.zip /tmp/chromedriver-linux64
+    (ln -sf /opt/google/chrome/google-chrome /usr/bin/google-chrome 2>/dev/null || true) && \
+    test -x /usr/bin/google-chrome && \
+    google-chrome --version
 
-ENV CHROMEDRIVER_PATH=/usr/local/bin/chromedriver
+ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
+ENV PLAYWRIGHT_CHROME_EXECUTABLE=/usr/bin/google-chrome
 ENV DISPLAY=:99
 ENV LANG=ko_KR.UTF-8
 ENV LC_ALL=ko_KR.UTF-8
