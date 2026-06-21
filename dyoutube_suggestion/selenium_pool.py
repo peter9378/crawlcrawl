@@ -78,10 +78,9 @@ class SeleniumDriverPool:
             try:
                 self.logger.info(f"[POOL] {thread_id}: Creating new driver (attempt {attempt+1}/{self.MAX_CREATION_RETRIES})")
                 
-                # 전역 락을 사용하여 동시에 여러 브라우저가 구동되어 CPU가 폭주하는 것을 방지
-                with self._lock:
-                    driver = SeleniumDriver(start_url='about:blank')
-                    driver.set_up()
+                # 기본 URL은 YouTube로 설정 (나중에 get()으로 변경)
+                driver = SeleniumDriver(start_url='https://www.youtube.com/')
+                driver.set_up()
                 
                 if not driver.health_check():
                     raise Exception("Driver health check failed after creation")
@@ -172,6 +171,8 @@ class SeleniumDriverPool:
         """
         thread_id = self._get_thread_id()
         driver = None
+        original_window = None
+        new_window = None
         
         try:
             # 드라이버 가져오기 (재시작이 필요하면 여기서 처리됨)
@@ -194,12 +195,17 @@ class SeleniumDriverPool:
                 f"restart in {remaining} requests)"
             )
             
-            # URL 로드. about:blank는 호출자가 직접 초기 URL을 제어할 때 사용한다.
-            if url and url != "about:blank":
-                self.logger.info(f"[POOL] {thread_id}: Loading URL: {url}")
-                driver.load_url(url)
-            else:
-                self.logger.info(f"[POOL] {thread_id}: Initial URL load skipped: {url}")
+            # 새 탭 열기 (기존 탭에 영향 없이)
+            original_window = driver.driver.current_window_handle
+            driver.driver.execute_script("window.open('');")
+            
+            # 새 탭으로 전환
+            new_window = driver.driver.window_handles[-1]
+            driver.driver.switch_to.window(new_window)
+            
+            # URL 로드
+            self.logger.info(f"[POOL] {thread_id}: Loading URL in new tab: {url}")
+            driver.driver.get(url)
             
             # 드라이버를 사용자에게 제공
             yield driver
@@ -214,14 +220,22 @@ class SeleniumDriverPool:
             raise
             
         finally:
-            # 리소스 정리 (about:blank 로 이동하여 메모리 확보)
+            # 새 탭 닫기 (리소스 정리)
             try:
-                if driver and driver.driver:
-                    self.logger.debug(f"[POOL] {thread_id}: Navigating to about:blank for cleanup")
-                    driver.reset_to_blank()
+                if driver and driver.driver and new_window:
+                    self.logger.debug(f"[POOL] {thread_id}: Closing new tab")
+                    driver.driver.close()
+                    
+                    # 원래 탭으로 돌아가기
+                    if original_window and original_window in driver.driver.window_handles:
+                        driver.driver.switch_to.window(original_window)
+                    elif len(driver.driver.window_handles) > 0:
+                        # 원래 창이 없으면 첫 번째 창으로
+                        driver.driver.switch_to.window(driver.driver.window_handles[0])
+                        
             except Exception as e:
-                self.logger.warning(f"[POOL] {thread_id}: Error cleaning up page: {e}")
-                # 정리 실패 시 다음 요청에서 드라이버 재시작
+                self.logger.warning(f"[POOL] {thread_id}: Error closing tab: {e}")
+                # 탭 닫기 실패 시 다음 요청에서 드라이버 재시작
                 if hasattr(self._local, 'use_count'):
                     self._local.use_count = self.MAX_USES_BEFORE_RESTART
     
