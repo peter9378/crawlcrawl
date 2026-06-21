@@ -7,7 +7,6 @@ import time
 import logging
 from typing import Optional
 from contextlib import contextmanager
-from selenium.common.exceptions import TimeoutException
 from selenium_driver import SeleniumDriver
 
 
@@ -173,8 +172,6 @@ class SeleniumDriverPool:
         """
         thread_id = self._get_thread_id()
         driver = None
-        original_window = None
-        new_window = None
         
         try:
             # 드라이버 가져오기 (재시작이 필요하면 여기서 처리됨)
@@ -197,21 +194,9 @@ class SeleniumDriverPool:
                 f"restart in {remaining} requests)"
             )
             
-            # 새 탭 열기 (기존 탭에 영향 없이)
-            original_window = driver.driver.current_window_handle
-            driver.driver.execute_script("window.open('');")
-            
-            # 새 탭으로 전환
-            new_window = driver.driver.window_handles[-1]
-            driver.driver.switch_to.window(new_window)
-            
             # URL 로드
-            self.logger.info(f"[POOL] {thread_id}: Loading URL in new tab: {url}")
-            try:
-                driver.driver.get(url)
-            except TimeoutException as e:
-                self.logger.warning(f"[POOL] {thread_id}: Timeout loading target URL (ignored): {e}")
-                # 타임아웃이 나더라도 DOM은 대부분 렌더링된 상태이므로 무시하고 진행
+            self.logger.info(f"[POOL] {thread_id}: Loading URL: {url}")
+            driver.load_url(url)
             
             # 드라이버를 사용자에게 제공
             yield driver
@@ -226,22 +211,14 @@ class SeleniumDriverPool:
             raise
             
         finally:
-            # 새 탭 닫기 (리소스 정리)
+            # 리소스 정리 (about:blank 로 이동하여 메모리 확보)
             try:
-                if driver and driver.driver and new_window:
-                    self.logger.debug(f"[POOL] {thread_id}: Closing new tab")
-                    driver.driver.close()
-                    
-                    # 원래 탭으로 돌아가기
-                    if original_window and original_window in driver.driver.window_handles:
-                        driver.driver.switch_to.window(original_window)
-                    elif len(driver.driver.window_handles) > 0:
-                        # 원래 창이 없으면 첫 번째 창으로
-                        driver.driver.switch_to.window(driver.driver.window_handles[0])
-                        
+                if driver and driver.driver:
+                    self.logger.debug(f"[POOL] {thread_id}: Navigating to about:blank for cleanup")
+                    driver.driver.get("about:blank")
             except Exception as e:
-                self.logger.warning(f"[POOL] {thread_id}: Error closing tab: {e}")
-                # 탭 닫기 실패 시 다음 요청에서 드라이버 재시작
+                self.logger.warning(f"[POOL] {thread_id}: Error cleaning up page: {e}")
+                # 정리 실패 시 다음 요청에서 드라이버 재시작
                 if hasattr(self._local, 'use_count'):
                     self._local.use_count = self.MAX_USES_BEFORE_RESTART
     
