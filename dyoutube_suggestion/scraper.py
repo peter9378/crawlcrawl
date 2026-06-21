@@ -7,6 +7,10 @@ from dateutil.relativedelta import relativedelta
 from urllib.parse import quote
 
 from bs4 import BeautifulSoup
+from selenium.webdriver.common.by import By
+from selenium.webdriver.common.keys import Keys
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
 
 # 개선된 셀레니움 드라이버 풀 사용
 from selenium_pool import get_driver_pool
@@ -19,33 +23,40 @@ class Scraper:
 
     def get_suggestions(self, query: str):
         """
-        www.youtube.com 검색 결과 페이지에서 검색창을 focus한 뒤 노출되는 추천어를 크롤링한다.
+        www.youtube.com에서 검색한 뒤 결과 화면 검색창을 클릭했을 때 노출되는 추천어를 크롤링한다.
         """
         query = (query or "").strip()
         if not query:
             return self._build_suggestion_response(query, [])
 
-        base_url = f"https://www.youtube.com/results?search_query={quote(query)}"
+        home_url = "https://www.youtube.com"
+        results_url = f"https://www.youtube.com/results?search_query={quote(query)}"
         suggestions = []
 
         try:
             self.logger.info(f"[YOUTUBE] Starting youtube.com suggestion crawl for: {query}")
             pool = get_driver_pool()
 
-            with pool.get_driver(base_url) as driver_wrapper:
+            with pool.get_driver(home_url) as driver_wrapper:
                 driver = driver_wrapper.driver
-                self.logger.info(f"[YOUTUBE] Current URL: {driver.current_url}")
+                self._set_korean_locale(driver_wrapper)
 
-                if self._focus_search_input_with_cdp(driver_wrapper):
-                    time.sleep(1.5)
-                    suggestions = self._scrape_suggestion_texts(driver_wrapper)
-                    self.logger.info(f"[YOUTUBE] Suggestions after focus: {suggestions}")
+                if not self._submit_search_from_home(driver_wrapper, query):
+                    self.logger.warning("[YOUTUBE] Home search failed, loading results URL directly")
+                    driver_wrapper.load_url(results_url)
 
-                    if not suggestions:
-                        self._refresh_suggestions_with_keyboard(driver_wrapper)
-                        time.sleep(1.5)
-                        suggestions = self._scrape_suggestion_texts(driver_wrapper)
-                        self.logger.info(f"[YOUTUBE] Suggestions after keyboard refresh: {suggestions}")
+                self._wait_for_results_page(driver_wrapper, results_url)
+                self.logger.info(f"[YOUTUBE] Current URL after search: {driver.current_url}")
+
+                if self._open_search_suggestions(driver_wrapper):
+                    list_a = self._wait_for_suggestions(driver_wrapper)
+                    self.logger.info(f"[YOUTUBE] List A (Focus): {list_a}")
+
+                    self._refresh_suggestions_with_keyboard(driver_wrapper)
+                    list_b = self._wait_for_suggestions(driver_wrapper)
+                    self.logger.info(f"[YOUTUBE] List B (Space): {list_b}")
+
+                    suggestions = self._dedupe_suggestions(list_b + list_a)
 
                 if not suggestions:
                     self.logger.warning("[YOUTUBE] No suggestion dropdown found on youtube.com page")
@@ -59,8 +70,186 @@ class Scraper:
             self.logger.error(traceback.format_exc())
             return self._build_suggestion_response(query, [])
 
+    def _set_korean_locale(self, driver_wrapper):
+        driver = driver_wrapper.driver
+        try:
+            driver.add_cookie({
+                "name": "PREF",
+                "value": "hl=ko&gl=KR",
+                "domain": ".youtube.com",
+                "path": "/",
+            })
+            driver_wrapper.load_url("https://www.youtube.com")
+            self.logger.info("[YOUTUBE] Cookie for KR/ko set and home page reloaded")
+        except Exception as e:
+            self.logger.warning(f"[YOUTUBE] Failed to set KR/ko cookie with WebDriver: {e}")
+            try:
+                driver.execute_cdp_cmd("Network.setCookie", {
+                    "name": "PREF",
+                    "value": "hl=ko&gl=KR",
+                    "domain": ".youtube.com",
+                    "path": "/",
+                    "url": "https://www.youtube.com/",
+                })
+                driver_wrapper.load_url("https://www.youtube.com")
+                self.logger.info("[YOUTUBE] Cookie for KR/ko set via CDP and home page reloaded")
+            except Exception as cdp_error:
+                self.logger.warning(f"[YOUTUBE] Failed to set KR/ko cookie via CDP: {cdp_error}")
+
+    def _submit_search_from_home(self, driver_wrapper, query: str) -> bool:
+        driver = driver_wrapper.driver
+        try:
+            wait = WebDriverWait(driver, 10)
+            search_input = wait.until(
+                EC.element_to_be_clickable((By.NAME, "search_query"))
+            )
+            self.logger.info("[YOUTUBE] Found home search input")
+
+            driver.execute_script(
+                "arguments[0].value = arguments[1]; "
+                "arguments[0].dispatchEvent(new Event('input', { bubbles: true })); "
+                "arguments[0].dispatchEvent(new Event('change', { bubbles: true })); "
+                "arguments[0].focus();",
+                search_input,
+                query
+            )
+            search_input.send_keys(Keys.RETURN)
+            self.logger.info(f"[YOUTUBE] Entered query '{query}' and pressed ENTER")
+            return True
+
+        except Exception as webdriver_error:
+            self.logger.warning(f"[YOUTUBE] WebDriver home search failed, trying JS fallback: {webdriver_error}")
+
+        try:
+            found = self._run_search_input_script_until(
+                driver,
+                """
+                input.value = arguments[0];
+                input.dispatchEvent(new Event('input', { bubbles: true }));
+                input.dispatchEvent(new Event('change', { bubbles: true }));
+                input.focus();
+                return input.outerHTML;
+                """,
+                query,
+                timeout=12
+            )
+            if not found:
+                self.logger.warning("[YOUTUBE] Home search input not found")
+                return False
+
+            self.logger.info(f"[YOUTUBE] Found home input via JS: {found[:200]}")
+            self._press_enter(driver)
+            return True
+
+        except Exception as e:
+            self.logger.warning(f"[YOUTUBE] Failed to submit home search via JS: {e}")
+            return False
+
+    def _wait_for_results_page(self, driver_wrapper, fallback_url: str):
+        driver = driver_wrapper.driver
+        deadline = time.monotonic() + 12
+        while time.monotonic() < deadline:
+            try:
+                if "youtube.com/results" in driver.current_url:
+                    time.sleep(1.0)
+                    return
+            except Exception:
+                pass
+            time.sleep(0.25)
+
+        self.logger.warning("[YOUTUBE] Search did not navigate to results in time; loading fallback URL")
+        driver_wrapper.load_url(fallback_url)
+        time.sleep(1.0)
+
+    def _open_search_suggestions(self, driver_wrapper) -> bool:
+        driver = driver_wrapper.driver
+        try:
+            found = self._run_search_input_script_until(
+                driver,
+                """
+                input.scrollIntoView({ block: 'center', inline: 'center' });
+                input.focus();
+                ['pointerdown', 'mousedown', 'mouseup', 'click'].forEach(function(type) {
+                    input.dispatchEvent(new MouseEvent(type, {
+                        bubbles: true,
+                        cancelable: true,
+                        view: window
+                    }));
+                });
+                input.dispatchEvent(new Event('input', { bubbles: true }));
+                return input.outerHTML;
+                """,
+                timeout=12
+            )
+            if not found:
+                self.logger.warning("[YOUTUBE] Search input was not found via JS")
+                return self._focus_search_input_with_cdp(driver_wrapper)
+
+            self.logger.info(f"[YOUTUBE] Found input via JS: {found[:200]}")
+            active = driver.execute_script(
+                """
+                var el = document.activeElement;
+                if (!el) return '';
+                return el.tagName.toLowerCase() + '.' + (el.className || '');
+                """
+            )
+            self.logger.info(f"[YOUTUBE] Active Element: {active}")
+            return True
+
+        except Exception as e:
+            self.logger.warning(f"[YOUTUBE] Failed to open suggestions via JS: {e}")
+            return self._focus_search_input_with_cdp(driver_wrapper)
+
+    def _run_search_input_script_until(self, driver, body: str, *args, timeout: float = 10):
+        deadline = time.monotonic() + timeout
+        last_error = None
+
+        while time.monotonic() < deadline:
+            try:
+                result = driver.execute_script(self._search_input_script(body), *args)
+                if result:
+                    return result
+            except Exception as e:
+                last_error = e
+            time.sleep(0.5)
+
+        if last_error:
+            self.logger.warning(f"[YOUTUBE] Search input JS wait ended with error: {last_error}")
+        return None
+
+    def _search_input_script(self, body: str) -> str:
+        return f"""
+        var selectors = [
+            'input[name="search_query"]',
+            'input#search',
+            'input.ytSearchboxComponentInput'
+        ];
+        var inputs = [];
+        selectors.forEach(function(selector) {{
+            document.querySelectorAll(selector).forEach(function(input) {{
+                if (inputs.indexOf(input) === -1) inputs.push(input);
+            }});
+        }});
+        var input = inputs.find(function(el) {{
+            var rect = el.getBoundingClientRect();
+            return rect.width > 0 && rect.height > 0;
+        }}) || inputs[0];
+        if (!input) return null;
+        {body}
+        """
+
+    def _press_enter(self, driver):
+        for event_type in ("keyDown", "keyUp"):
+            driver.execute_cdp_cmd("Input.dispatchKeyEvent", {
+                "type": event_type,
+                "key": "Enter",
+                "code": "Enter",
+                "windowsVirtualKeyCode": 13,
+                "nativeVirtualKeyCode": 13,
+            })
+
     def _focus_search_input_with_cdp(self, driver_wrapper) -> bool:
-        """Selenium clickable wait 대신 CDP DOM/Mouse event로 검색창을 focus한다."""
+        """JS focus가 실패할 때 CDP DOM/Mouse event로 검색창을 focus한다."""
         driver = driver_wrapper.driver
         selectors = [
             'input[name="search_query"]',
@@ -156,6 +345,29 @@ class Scraper:
         except Exception as e:
             self.logger.warning(f"[YOUTUBE] Failed to refresh suggestions with keyboard: {e}")
 
+    def _wait_for_suggestions(self, driver_wrapper, timeout: float = 6):
+        deadline = time.monotonic() + timeout
+        last_result = []
+
+        while time.monotonic() < deadline:
+            last_result = self._scrape_suggestion_texts(driver_wrapper)
+            if last_result:
+                return last_result
+            time.sleep(0.4)
+
+        return last_result
+
+    def _dedupe_suggestions(self, suggestions):
+        seen = set()
+        result = []
+        for item in suggestions:
+            for part in str(item).splitlines():
+                text = " ".join(part.split())
+                if text and text not in seen:
+                    result.append(text)
+                    seen.add(text)
+        return result
+
     def _build_suggestion_response(self, query: str, suggestions):
         return {
             "keyword": query,
@@ -174,6 +386,40 @@ class Scraper:
         """
         suggestions = []
         try:
+            js_suggestions = driver_wrapper.driver.execute_script(
+                """
+                var texts = [];
+                var input = document.querySelector('input[name="search_query"], input#search, input.ytSearchboxComponentInput');
+                if (input && input.getAttribute('aria-controls')) {
+                    var listId = input.getAttribute('aria-controls');
+                    var listEl = document.getElementById(listId);
+                    if (listEl) {
+                        listEl.querySelectorAll('[role="option"], li, div.ytSuggestionComponentSuggestion').forEach(function(el) {
+                            var t = (el.innerText || el.textContent || '').trim();
+                            if (t) texts.push(t);
+                        });
+                    }
+                }
+
+                if (texts.length === 0) {
+                    document.querySelectorAll(
+                        'div.ytSuggestionComponentSuggestion div.ytSuggestionComponentText, ' +
+                        'div.ytSuggestionComponentSuggestion, ' +
+                        '[role="option"], ' +
+                        'li.sbsb_c .sbqs_c, ' +
+                        'li.sbsb_c'
+                    ).forEach(function(el) {
+                        var t = (el.innerText || el.textContent || '').trim();
+                        if (t) texts.push(t);
+                    });
+                }
+                return texts;
+                """
+            )
+            suggestions = self._dedupe_suggestions(js_suggestions or [])
+            if suggestions:
+                return suggestions
+
             html_content = driver_wrapper.get_page_source()
             if not html_content:
                 return suggestions

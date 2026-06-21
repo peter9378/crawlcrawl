@@ -29,6 +29,8 @@ class SeleniumDriver:
     DOCUMENT_READY_TIMEOUT = float(os.environ.get('SELENIUM_DOCUMENT_READY_TIMEOUT', '10'))
     # URL 전환 후 동적 DOM이 채워질 최소 대기 시간 (초)
     PAGE_STABILIZE_DELAY = float(os.environ.get('SELENIUM_PAGE_STABILIZE_DELAY', '2.5'))
+    # YouTube SPA hydration을 위해 기본적으로 페이지 로딩을 강제 중단하지 않는다.
+    STOP_LOADING_AFTER_NAVIGATE = os.environ.get('SELENIUM_STOP_LOADING_AFTER_NAVIGATE', 'false').lower() == 'true'
     # 빈 문서로 간주할 최소 HTML 길이
     MIN_PAGE_SOURCE_LENGTH = 100
     # 암묵적 대기 시간 (초)
@@ -217,7 +219,8 @@ class SeleniumDriver:
             self._navigate_with_cdp(url)
             self._wait_for_document_ready(url)
             time.sleep(self.PAGE_STABILIZE_DELAY)
-            self._stop_loading()
+            if self.STOP_LOADING_AFTER_NAVIGATE:
+                self._stop_loading()
             self._validate_page_source(url)
             self.logger.info("[SELENIUM] Target URL loaded successfully")
 
