@@ -70,14 +70,14 @@ class Scraper:
 
     def _set_korean_locale(self, driver):
         try:
-            driver.add_cookie({
-                'name': 'PREF',
-                'value': 'hl=ko&gl=KR',
-                'domain': '.youtube.com',
-                'path': '/'
+            driver.execute_cdp_cmd("Network.setCookie", {
+                "name": "PREF",
+                "value": "hl=ko&gl=KR",
+                "domain": ".youtube.com",
+                "path": "/",
+                "url": "https://www.youtube.com/"
             })
-            driver.refresh()
-            self.logger.info("[YOUTUBE] Cookie for KR/ko set and page refreshed.")
+            self.logger.info("[YOUTUBE] Cookie for KR/ko set.")
         except Exception as e:
             self.logger.warning(f"[YOUTUBE] Failed to set cookie: {e}")
 
@@ -163,11 +163,10 @@ class Scraper:
                             if (inputs.indexOf(input) === -1) inputs.push(input);
                         });
                     });
-                    var visible = inputs.find(function(el) {
+                    return inputs.find(function(el) {
                         var rect = el.getBoundingClientRect();
                         return rect.width > 0 && rect.height > 0;
-                    });
-                    return visible || inputs[0] || null;
+                    }) || null;
                     """
                 )
                 if result:
