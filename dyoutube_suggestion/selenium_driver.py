@@ -22,9 +22,9 @@ def _chrome_service() -> Service:
 
 class SeleniumDriver:
     # 페이지 로드 타임아웃 (초)
-    PAGE_LOAD_TIMEOUT = int(os.environ.get('SELENIUM_PAGE_LOAD_TIMEOUT', '20'))
+    PAGE_LOAD_TIMEOUT = int(os.environ.get('SELENIUM_PAGE_LOAD_TIMEOUT', '45'))
     # 스크립트 실행 타임아웃 (초)
-    SCRIPT_TIMEOUT = int(os.environ.get('SELENIUM_SCRIPT_TIMEOUT', '5'))
+    SCRIPT_TIMEOUT = int(os.environ.get('SELENIUM_SCRIPT_TIMEOUT', '10'))
     # 명시적 페이지 준비 대기 시간 (초)
     DOCUMENT_READY_TIMEOUT = float(os.environ.get('SELENIUM_DOCUMENT_READY_TIMEOUT', '12'))
     # URL 전환 후 동적 DOM이 채워질 최소 대기 시간 (초)
@@ -47,12 +47,10 @@ class SeleniumDriver:
 
     def _get_options(self):
         options = ChromeOptions()
-        options.add_argument('--headless=new')
+        options.add_argument('--headless')
         options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36")
         options.add_argument('--window-size=1920,1080')
         options.add_argument('--disable-gpu')
-        options.add_argument('--disable-software-rasterizer')
-        options.add_argument('--disable-features=VizDisplayCompositor,SearchProviderFirstRun,AsyncDns,DnsOverHttpsTemplates')
         options.add_argument('--no-sandbox')
         options.add_argument('--disable-sync')
         #options.add_argument('--disable-background-networking')
@@ -70,12 +68,9 @@ class SeleniumDriver:
         options.add_argument('--disable-device-discovery-notifications')
         options.add_argument('--mute-audio')
         options.add_argument('--blink-settings=imagesEnabled=false')  # Disable images
-        options.add_argument('--dns-prefetch-disable')
+        options.add_argument('--disable-features=SearchProviderFirstRun')
         options.add_argument('--disable-geolocation')
-        options.add_argument('--disable-async-dns')
-        options.add_argument('--disable-gpu-sandbox')
-        options.add_argument('--disable-blink-features=AutomationControlled')
-        options.page_load_strategy = 'none'
+        options.page_load_strategy = 'eager'
         
         prefs = {
             "profile.managed_default_content_settings.images": 2,  # Disable images
@@ -84,8 +79,6 @@ class SeleniumDriver:
             "profile.password_manager_enabled": False
         }
         options.add_experimental_option("prefs", prefs)
-        options.add_experimental_option("excludeSwitches", ["enable-automation"])
-        options.add_experimental_option('useAutomationExtension', False)
         return options
 
     def set_up(self):
@@ -192,8 +185,6 @@ class SeleniumDriver:
     def _configure_cdp(self):
         """Chrome DevTools Protocol 기반 설정을 적용합니다."""
         try:
-            self.driver.execute_cdp_cmd("Page.enable", {})
-            self.driver.execute_cdp_cmd("DOM.enable", {})
             self.driver.execute_cdp_cmd("Network.enable", {})
             self.driver.execute_cdp_cmd("Network.setBlockedURLs", {
                 "urls": [
@@ -208,9 +199,6 @@ class SeleniumDriver:
                 "domain": ".youtube.com",
                 "path": "/",
                 "url": "https://www.youtube.com/"
-            })
-            self.driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
-                "source": "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"
             })
         except WebDriverException as e:
             self.logger.warning(f"[SELENIUM] Could not configure CDP options: {e}")
@@ -229,7 +217,11 @@ class SeleniumDriver:
                     f"[SELENIUM] Loading target URL: {url} "
                     f"(attempt {attempt}/{self.NAVIGATION_RETRIES})"
                 )
-                self._navigate_with_cdp(url)
+                try:
+                    self.driver.get(url)
+                except TimeoutException as e:
+                    self.logger.warning(f"[SELENIUM] driver.get timed out, validating rendered page: {e}")
+                    self._stop_loading()
                 self._wait_for_document_ready(url)
                 if "youtube.com" in url:
                     self._wait_for_youtube_interactive(url)
@@ -253,15 +245,6 @@ class SeleniumDriver:
         error_msg = f"[SELENIUM] Failed to load target URL after {self.NAVIGATION_RETRIES} attempts: {url}"
         self.logger.warning(error_msg)
         raise WebDriverException(error_msg) from last_error
-
-    def _navigate_with_cdp(self, url: str):
-        """일반 driver.get 대기 대신 CDP navigation으로 빠르게 전환합니다."""
-        try:
-            self.driver.execute_cdp_cmd("Page.navigate", {"url": url})
-        except WebDriverException as e:
-            error_msg = f"[SELENIUM] CDP navigation failed for {url}: {e}"
-            self.logger.warning(error_msg)
-            raise WebDriverException(error_msg) from e
 
     def _wait_for_document_ready(self, url: str):
         """JS 실행 없이 URL이 실제 검색 페이지로 전환될 때까지 대기"""
