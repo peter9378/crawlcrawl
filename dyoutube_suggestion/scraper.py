@@ -66,7 +66,7 @@ class Scraper:
         except Exception as e:
             self.logger.error(f"[YOUTUBE] Error in get_suggestions: {e}")
             self.logger.error(traceback.format_exc())
-            return self._build_suggestion_response(query, [])
+            raise
 
     def _set_korean_locale(self, driver):
         try:

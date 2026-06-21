@@ -31,6 +31,9 @@ class SeleniumDriver:
     PAGE_STABILIZE_DELAY = float(os.environ.get('SELENIUM_PAGE_STABILIZE_DELAY', '1.5'))
     # YouTube 앱 shell이 렌더링될 때까지 기다리는 시간 (초)
     YOUTUBE_INTERACTIVE_TIMEOUT = float(os.environ.get('SELENIUM_YOUTUBE_INTERACTIVE_TIMEOUT', '45'))
+    # 네트워크/DNS 일시 실패 시 URL 로드 재시도 횟수
+    NAVIGATION_RETRIES = int(os.environ.get('SELENIUM_NAVIGATION_RETRIES', '3'))
+    NAVIGATION_RETRY_DELAY = float(os.environ.get('SELENIUM_NAVIGATION_RETRY_DELAY', '2.0'))
     # 빈 문서로 간주할 최소 HTML 길이
     MIN_PAGE_SOURCE_LENGTH = 100
     # 암묵적 대기 시간 (초)
@@ -49,7 +52,7 @@ class SeleniumDriver:
         options.add_argument('--window-size=1920,1080')
         options.add_argument('--disable-gpu')
         options.add_argument('--disable-software-rasterizer')
-        options.add_argument('--disable-features=VizDisplayCompositor')
+        options.add_argument('--disable-features=VizDisplayCompositor,SearchProviderFirstRun,AsyncDns,DnsOverHttpsTemplates')
         options.add_argument('--no-sandbox')
         options.add_argument('--disable-sync')
         #options.add_argument('--disable-background-networking')
@@ -67,8 +70,9 @@ class SeleniumDriver:
         options.add_argument('--disable-device-discovery-notifications')
         options.add_argument('--mute-audio')
         options.add_argument('--blink-settings=imagesEnabled=false')  # Disable images
-        options.add_argument('--disable-features=SearchProviderFirstRun')
+        options.add_argument('--dns-prefetch-disable')
         options.add_argument('--disable-geolocation')
+        options.add_argument('--disable-async-dns')
         options.add_argument('--disable-gpu-sandbox')
         options.add_argument('--disable-blink-features=AutomationControlled')
         options.page_load_strategy = 'none'
@@ -218,27 +222,37 @@ class SeleniumDriver:
             self.logger.error(error_msg)
             raise WebDriverException(error_msg)
 
-        try:
-            self.logger.info(f"[SELENIUM] Loading target URL: {url}")
-            self._navigate_with_cdp(url)
-            self._wait_for_document_ready(url)
-            if "youtube.com" in url:
-                self._wait_for_youtube_interactive(url)
-            else:
-                time.sleep(self.PAGE_STABILIZE_DELAY)
+        last_error = None
+        for attempt in range(1, self.NAVIGATION_RETRIES + 1):
+            try:
+                self.logger.info(
+                    f"[SELENIUM] Loading target URL: {url} "
+                    f"(attempt {attempt}/{self.NAVIGATION_RETRIES})"
+                )
+                self._navigate_with_cdp(url)
+                self._wait_for_document_ready(url)
+                if "youtube.com" in url:
+                    self._wait_for_youtube_interactive(url)
+                else:
+                    time.sleep(self.PAGE_STABILIZE_DELAY)
+                    self._stop_loading()
+                self._validate_page_source(url)
+                self.logger.info("[SELENIUM] Target URL loaded successfully")
+                return
+
+            except (TimeoutException, WebDriverException) as e:
+                last_error = e
                 self._stop_loading()
-            self._validate_page_source(url)
-            self.logger.info("[SELENIUM] Target URL loaded successfully")
+                self.logger.warning(
+                    f"[SELENIUM] Target URL load attempt {attempt}/{self.NAVIGATION_RETRIES} failed: {e}"
+                )
+                if attempt < self.NAVIGATION_RETRIES:
+                    self._reset_to_blank_quietly()
+                    time.sleep(self.NAVIGATION_RETRY_DELAY * attempt)
 
-        except TimeoutException as e:
-            self._stop_loading()
-            error_msg = f"[SELENIUM] Timed out loading target URL: {url}"
-            self.logger.warning(error_msg)
-            raise WebDriverException(error_msg) from e
-
-        except WebDriverException:
-            self._stop_loading()
-            raise
+        error_msg = f"[SELENIUM] Failed to load target URL after {self.NAVIGATION_RETRIES} attempts: {url}"
+        self.logger.warning(error_msg)
+        raise WebDriverException(error_msg) from last_error
 
     def _navigate_with_cdp(self, url: str):
         """일반 driver.get 대기 대신 CDP navigation으로 빠르게 전환합니다."""
@@ -256,6 +270,11 @@ class SeleniumDriver:
 
         while time.monotonic() < deadline:
             last_url = self._safe_current_url()
+            state = self._get_page_state()
+            if self._is_chrome_error_state(state):
+                raise WebDriverException(
+                    f"[SELENIUM] Chrome error page while loading {url}: {state}"
+                )
             if last_url != "about:blank" and last_url.startswith(("http://", "https://")):
                 return
             time.sleep(0.25)
@@ -281,20 +300,29 @@ class SeleniumDriver:
                         var rect = el.getBoundingClientRect();
                         return rect.width > 0 && rect.height > 0;
                     });
+                    var bodyText = (document.body && document.body.innerText || '').replace(/\\s+/g, ' ').trim();
                     return {
                         href: location.href,
                         readyState: document.readyState,
                         title: document.title || '',
                         ytdApp: !!document.querySelector('ytd-app'),
                         inputCount: inputs.length,
-                        visibleInput: !!visibleInput
+                        visibleInput: !!visibleInput,
+                        bodyPreview: bodyText.slice(0, 220)
                     };
                     """
                 )
                 last_state = state
+                if self._is_chrome_error_state(state):
+                    raise WebDriverException(
+                        f"[SELENIUM] Chrome error page while loading {url}: {state}"
+                    )
                 if state and state.get("visibleInput"):
                     self.logger.info(f"[SELENIUM] YouTube search input rendered: {state}")
                     return
+            except WebDriverException as e:
+                last_error = e
+                raise
             except Exception as e:
                 last_error = e
 
@@ -310,11 +338,15 @@ class SeleniumDriver:
                 f"[SELENIUM] YouTube search input was not rendered before timeout for {url}; "
                 f"last_state={last_state}"
             )
+        raise TimeoutException(
+            f"YouTube search input was not rendered for {url}; last_state={last_state}"
+        )
 
     def _validate_page_source(self, url: str):
         """빈 문서나 about:blank를 성공 로드로 취급하지 않도록 검증"""
         deadline = time.monotonic() + self.DOCUMENT_READY_TIMEOUT
-        current_url = self._safe_current_url()
+        state = self._get_page_state()
+        current_url = state.get("href") or self._safe_current_url()
         html_content = self.get_page_source() or ""
 
         while (
@@ -323,8 +355,14 @@ class SeleniumDriver:
             and time.monotonic() < deadline
         ):
             time.sleep(0.5)
-            current_url = self._safe_current_url()
+            state = self._get_page_state()
+            current_url = state.get("href") or self._safe_current_url()
             html_content = self.get_page_source() or ""
+
+        if self._is_chrome_error_state(state):
+            raise WebDriverException(
+                f"[SELENIUM] Chrome error page after loading {url}: {state}"
+            )
 
         if current_url == "about:blank":
             raise WebDriverException(
@@ -354,6 +392,12 @@ class SeleniumDriver:
         except Exception as e:
             self.logger.debug(f"[SELENIUM] Could not stop page load: {e}")
 
+    def _reset_to_blank_quietly(self):
+        try:
+            self.reset_to_blank()
+        except Exception as e:
+            self.logger.debug(f"[SELENIUM] Could not reset before retry: {e}")
+
     def reset_to_blank(self):
         """다음 요청 전 브라우저 상태를 가볍게 초기화합니다."""
         if not self.driver:
@@ -371,6 +415,51 @@ class SeleniumDriver:
             return self.driver.current_url if self.driver else "no-driver"
         except Exception:
             return "unavailable"
+
+    def _get_page_state(self) -> dict:
+        if not self.driver:
+            return {"href": "no-driver", "bodyPreview": ""}
+
+        try:
+            return self.driver.execute_script(
+                """
+                var bodyText = (document.body && document.body.innerText || '').replace(/\\s+/g, ' ').trim();
+                return {
+                    href: location.href,
+                    readyState: document.readyState,
+                    title: document.title || '',
+                    bodyPreview: bodyText.slice(0, 260)
+                };
+                """
+            ) or {}
+        except Exception as e:
+            return {
+                "href": self._safe_current_url(),
+                "bodyPreview": "",
+                "error": type(e).__name__
+            }
+
+    def _is_chrome_error_state(self, state: dict) -> bool:
+        if not state:
+            return False
+
+        href = str(state.get("href") or "")
+        body = str(state.get("bodyPreview") or "")
+        title = str(state.get("title") or "")
+        text = f"{href} {title} {body}"
+        error_markers = (
+            "chrome-error://",
+            "ERR_NAME_NOT_RESOLVED",
+            "ERR_INTERNET_DISCONNECTED",
+            "ERR_CONNECTION_TIMED_OUT",
+            "ERR_CONNECTION_CLOSED",
+            "ERR_TUNNEL_CONNECTION_FAILED",
+            "DNS_PROBE",
+            "This site can't be reached",
+            "This site can’t be reached",
+            "server IP address could not be found",
+        )
+        return any(marker in text for marker in error_markers)
 
     def health_check(self) -> bool:
         """드라이버 상태 확인
