@@ -48,9 +48,13 @@ class Scraper:
                 self.logger.warning(f"[YOUTUBE] Suggestion crawl failed for {base_url}: {e}")
 
         if last_error:
-            self.logger.error(f"[YOUTUBE] Error in get_suggestions: {last_error}")
-            self.logger.error(traceback.format_exc())
-            raise last_error
+            self.logger.warning(f"[YOUTUBE] All youtube.com crawl attempts failed: {last_error}")
+            return self._build_suggestion_response(
+                query,
+                [],
+                error="youtube_unreachable",
+                detail=str(last_error)
+            )
 
         return self._build_suggestion_response(query, [])
 
@@ -86,8 +90,7 @@ class Scraper:
             return suggestions
 
         except Exception as e:
-            self.logger.error(f"[YOUTUBE] Error while crawling {base_url}: {e}")
-            self.logger.error(traceback.format_exc())
+            self.logger.warning(f"[YOUTUBE] Error while crawling {base_url}: {e}")
             raise
 
     def _set_korean_locale(self, driver):
@@ -294,8 +297,8 @@ class Scraper:
             result.append(text)
         return self._dedupe_suggestions(result)
 
-    def _build_suggestion_response(self, query: str, suggestions):
-        return {
+    def _build_suggestion_response(self, query: str, suggestions, error: str = None, detail: str = None):
+        response = {
             "keyword": query,
             "result": [
                 {
@@ -305,6 +308,10 @@ class Scraper:
                 for index, suggestion in enumerate(suggestions)
             ]
         }
+        if error:
+            response["error"] = error
+            response["detail"] = (detail or "")[:500]
+        return response
 
     def _scrape_suggestion_texts(self, driver):
         """

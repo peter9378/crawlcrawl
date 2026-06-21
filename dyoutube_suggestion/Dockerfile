@@ -16,6 +16,7 @@ RUN echo "ip_resolve=4" >> /etc/dnf/dnf.conf && \
         python3-pip \
         python3-devel \
         gcc \
+        glibc-langpack-ko \
         wget \
         unzip \
         xorg-x11-server-Xvfb \
@@ -57,6 +58,8 @@ RUN wget -q --inet4-only https://dl.google.com/linux/direct/google-chrome-stable
 
 ENV CHROMEDRIVER_PATH=/usr/local/bin/chromedriver
 ENV DISPLAY=:99
+ENV LANG=ko_KR.UTF-8
+ENV LC_ALL=ko_KR.UTF-8
 
 WORKDIR /app
 COPY requirements.txt ./
@@ -64,5 +67,7 @@ RUN pip3 install --upgrade pip && \
     pip3 install --no-cache-dir -r requirements.txt
 
 COPY . .
+RUN chmod +x /app/docker-entrypoint.sh
 
+ENTRYPOINT ["/app/docker-entrypoint.sh"]
 CMD ["gunicorn", "app:app", "-c", "gunicorn.conf.py"]

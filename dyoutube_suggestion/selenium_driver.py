@@ -10,19 +10,9 @@ import time
 import os
 import traceback
 import logging
-import random
-import socket
-import struct
 
 CHROMEDRIVER_PATH = os.environ.get('CHROMEDRIVER_PATH', '/usr/local/bin/chromedriver')
 YOUTUBE_HOSTS = ("www.youtube.com", "youtube.com", "m.youtube.com")
-PUBLIC_DNS_SERVERS = ("8.8.8.8", "1.1.1.1", "9.9.9.9")
-DEFAULT_YOUTUBE_FALLBACK_IPS = (
-    "142.250.190.78",
-    "142.251.32.46",
-    "172.217.174.110",
-    "216.58.220.110",
-)
 
 
 def _chrome_service() -> Service:
@@ -33,17 +23,17 @@ def _chrome_service() -> Service:
 
 class SeleniumDriver:
     # 페이지 로드 타임아웃 (초)
-    PAGE_LOAD_TIMEOUT = int(os.environ.get('SELENIUM_PAGE_LOAD_TIMEOUT', '45'))
+    PAGE_LOAD_TIMEOUT = int(os.environ.get('SELENIUM_PAGE_LOAD_TIMEOUT', '25'))
     # 스크립트 실행 타임아웃 (초)
     SCRIPT_TIMEOUT = int(os.environ.get('SELENIUM_SCRIPT_TIMEOUT', '10'))
     # 명시적 페이지 준비 대기 시간 (초)
-    DOCUMENT_READY_TIMEOUT = float(os.environ.get('SELENIUM_DOCUMENT_READY_TIMEOUT', '12'))
+    DOCUMENT_READY_TIMEOUT = float(os.environ.get('SELENIUM_DOCUMENT_READY_TIMEOUT', '6'))
     # URL 전환 후 동적 DOM이 채워질 최소 대기 시간 (초)
     PAGE_STABILIZE_DELAY = float(os.environ.get('SELENIUM_PAGE_STABILIZE_DELAY', '1.5'))
     # YouTube 앱 shell이 렌더링될 때까지 기다리는 시간 (초)
-    YOUTUBE_INTERACTIVE_TIMEOUT = float(os.environ.get('SELENIUM_YOUTUBE_INTERACTIVE_TIMEOUT', '45'))
+    YOUTUBE_INTERACTIVE_TIMEOUT = float(os.environ.get('SELENIUM_YOUTUBE_INTERACTIVE_TIMEOUT', '30'))
     # 네트워크/DNS 일시 실패 시 URL 로드 재시도 횟수
-    NAVIGATION_RETRIES = int(os.environ.get('SELENIUM_NAVIGATION_RETRIES', '3'))
+    NAVIGATION_RETRIES = int(os.environ.get('SELENIUM_NAVIGATION_RETRIES', '2'))
     NAVIGATION_RETRY_DELAY = float(os.environ.get('SELENIUM_NAVIGATION_RETRY_DELAY', '2.0'))
     # 빈 문서로 간주할 최소 HTML 길이
     MIN_PAGE_SOURCE_LENGTH = 100
@@ -81,6 +71,8 @@ class SeleniumDriver:
         options.add_argument('--blink-settings=imagesEnabled=false')  # Disable images
         options.add_argument('--disable-features=SearchProviderFirstRun')
         options.add_argument('--disable-geolocation')
+        options.add_argument('--disable-quic')
+        options.add_argument('--dns-prefetch-disable')
         host_resolver_rules = self._build_host_resolver_rules()
         if host_resolver_rules:
             options.add_argument(f'--host-resolver-rules={host_resolver_rules}')
@@ -104,20 +96,7 @@ class SeleniumDriver:
         if explicit_rules:
             return explicit_rules
 
-        ip = os.environ.get("YOUTUBE_HOST_IP") or self._resolve_youtube_ip()
-        if not ip:
-            fallback_ips = [
-                item.strip()
-                for item in os.environ.get(
-                    "YOUTUBE_FALLBACK_IPS",
-                    ",".join(DEFAULT_YOUTUBE_FALLBACK_IPS)
-                ).split(",")
-                if item.strip()
-            ]
-            ip = fallback_ips[0] if fallback_ips else ""
-            if ip:
-                self.logger.warning(f"[SELENIUM] Using fallback YouTube IP for Chrome resolver: {ip}")
-
+        ip = os.environ.get("YOUTUBE_HOST_IP", "").strip()
         if not ip:
             return ""
 
@@ -125,87 +104,6 @@ class SeleniumDriver:
         rules.append("EXCLUDE localhost")
         rules.append("EXCLUDE 127.0.0.1")
         return ",".join(rules)
-
-    def _resolve_youtube_ip(self):
-        for resolver in (self._resolve_with_public_dns, self._resolve_with_system_dns):
-            try:
-                ip = resolver("www.youtube.com")
-                if ip:
-                    return ip
-            except Exception as e:
-                self.logger.debug(f"[SELENIUM] YouTube resolver {resolver.__name__} failed: {e}")
-        return ""
-
-    def _resolve_with_system_dns(self, host):
-        infos = socket.getaddrinfo(host, 443, socket.AF_INET, socket.SOCK_STREAM)
-        for info in infos:
-            address = info[4][0]
-            if address:
-                return address
-        return ""
-
-    def _resolve_with_public_dns(self, host):
-        query_id = random.randint(0, 65535)
-        packet = self._build_dns_query(host, query_id)
-
-        for server in PUBLIC_DNS_SERVERS:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            try:
-                sock.settimeout(2.0)
-                sock.sendto(packet, (server, 53))
-                data, _ = sock.recvfrom(512)
-                ip = self._parse_dns_a_response(data, query_id)
-                if ip:
-                    self.logger.info(f"[SELENIUM] Resolved www.youtube.com via DNS {server}: {ip}")
-                    return ip
-            except Exception as e:
-                self.logger.debug(f"[SELENIUM] Public DNS {server} failed: {e}")
-            finally:
-                sock.close()
-        return ""
-
-    def _build_dns_query(self, host, query_id):
-        flags = 0x0100
-        qdcount = 1
-        header = struct.pack("!HHHHHH", query_id, flags, qdcount, 0, 0, 0)
-        qname = b"".join(bytes([len(part)]) + part.encode("ascii") for part in host.split(".")) + b"\x00"
-        question = qname + struct.pack("!HH", 1, 1)
-        return header + question
-
-    def _parse_dns_a_response(self, data, query_id):
-        if len(data) < 12:
-            return ""
-
-        response_id, _flags, qdcount, ancount, _nscount, _arcount = struct.unpack("!HHHHHH", data[:12])
-        if response_id != query_id:
-            return ""
-
-        offset = 12
-        for _ in range(qdcount):
-            offset = self._skip_dns_name(data, offset)
-            offset += 4
-
-        for _ in range(ancount):
-            offset = self._skip_dns_name(data, offset)
-            if offset + 10 > len(data):
-                return ""
-            rtype, rclass, _ttl, rdlength = struct.unpack("!HHIH", data[offset:offset + 10])
-            offset += 10
-            rdata = data[offset:offset + rdlength]
-            offset += rdlength
-            if rtype == 1 and rclass == 1 and rdlength == 4:
-                return socket.inet_ntoa(rdata)
-        return ""
-
-    def _skip_dns_name(self, data, offset):
-        while offset < len(data):
-            length = data[offset]
-            if length == 0:
-                return offset + 1
-            if length & 0xC0 == 0xC0:
-                return offset + 2
-            offset += 1 + length
-        return offset
 
     def set_up(self):
         """드라이버 초기화 및 페이지 로드

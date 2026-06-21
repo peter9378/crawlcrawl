@@ -64,8 +64,12 @@ def get_suggestions_sync(keyword: str):
         return suggestions
     except Exception as e:
         logger.error(f"[WORKER] Error in suggestion logic: {e}")
-        # scraper.py 내부에서 로깅하고 있으므로 여기선 re-raise하거나 빈 리스트 반환
-        raise e
+        return {
+            "keyword": keyword,
+            "result": [],
+            "error": "internal_error",
+            "detail": str(e)[:500],
+        }
 
 @app.get("/search/suggestions")
 async def search_suggestions(keyword: str):
@@ -84,7 +88,12 @@ async def search_suggestions(keyword: str):
         return result
     except Exception as e:
         logger.error(f"API Error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        return {
+            "keyword": keyword,
+            "result": [],
+            "error": "api_error",
+            "detail": str(e)[:500],
+        }
 
 @app.get("/health")
 async def health_check():

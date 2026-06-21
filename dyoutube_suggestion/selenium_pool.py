@@ -98,7 +98,7 @@ class SeleniumDriverPool:
                 
             except Exception as e:
                 last_error = e
-                self.logger.error(f"[POOL] {thread_id}: Failed to create driver (attempt {attempt+1}): {e}")
+                self.logger.warning(f"[POOL] {thread_id}: Failed to create driver (attempt {attempt+1}): {e}")
                 
                 if attempt < self.MAX_CREATION_RETRIES - 1:
                     time.sleep(2 ** attempt)  # 지수 백오프
@@ -111,7 +111,7 @@ class SeleniumDriverPool:
         if last_error:
             error_msg += f": {str(last_error)}"
         
-        self.logger.error(f"[POOL] {thread_id}: {error_msg}")
+        self.logger.warning(f"[POOL] {thread_id}: {error_msg}")
         raise Exception(error_msg)
     
     def _get_or_create_driver(self) -> SeleniumDriver:
@@ -203,7 +203,7 @@ class SeleniumDriverPool:
             yield driver
             
         except Exception as e:
-            self.logger.error(f"[POOL] {thread_id}: Error using driver: {e}")
+            self.logger.warning(f"[POOL] {thread_id}: Error using driver: {e}")
             
             # 에러 발생 시 드라이버를 재시작하도록 마킹
             if hasattr(self._local, 'use_count'):
