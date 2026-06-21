@@ -7,6 +7,10 @@ from dateutil.relativedelta import relativedelta
 from urllib.parse import quote
 
 from bs4 import BeautifulSoup
+from selenium.webdriver.common.by import By
+from selenium.webdriver.common.keys import Keys
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
 
 # 개선된 셀레니움 드라이버 풀 사용
 from selenium_pool import get_driver_pool
@@ -25,6 +29,7 @@ class Scraper:
         if not query:
             return self._build_suggestion_response(query, [])
 
+        home_url = "https://www.youtube.com"
         results_url = f"https://www.youtube.com/results?search_query={quote(query)}"
         suggestions = []
 
@@ -32,10 +37,15 @@ class Scraper:
             self.logger.info(f"[YOUTUBE] Starting youtube.com suggestion crawl for: {query}")
             pool = get_driver_pool()
 
-            with pool.get_driver("about:blank") as driver_wrapper:
+            with pool.get_driver(home_url) as driver_wrapper:
                 driver = driver_wrapper.driver
-                self._set_korean_locale_cookie(driver)
-                driver_wrapper.load_url(results_url)
+                self._set_korean_locale(driver)
+
+                if not self._submit_search_from_home(driver, query):
+                    self.logger.warning("[YOUTUBE] Home search failed; loading results URL directly")
+                    driver_wrapper.load_url(results_url)
+
+                self._wait_for_results_url(driver, results_url)
 
                 self.logger.info(f"[YOUTUBE] Current URL after search: {driver.current_url}")
 
@@ -64,7 +74,7 @@ class Scraper:
             self.logger.error(traceback.format_exc())
             return self._build_suggestion_response(query, [])
 
-    def _set_korean_locale_cookie(self, driver):
+    def _set_korean_locale(self, driver):
         cookies = [
             {
                 "name": "PREF",
@@ -89,6 +99,51 @@ class Scraper:
                 self.logger.warning(f"[YOUTUBE] Failed to set cookie {cookie['name']} via CDP: {e}")
 
         self.logger.info("[YOUTUBE] Locale/consent cookies set via CDP")
+        try:
+            driver.refresh()
+            time.sleep(1.0)
+            self.logger.info("[YOUTUBE] Page refreshed after locale cookies")
+        except Exception as e:
+            self.logger.warning(f"[YOUTUBE] Failed to refresh after cookies: {e}")
+
+    def _submit_search_from_home(self, driver, query: str) -> bool:
+        try:
+            wait = WebDriverWait(driver, 12)
+            search_input = wait.until(
+                EC.element_to_be_clickable((By.NAME, "search_query"))
+            )
+            self.logger.info("[YOUTUBE] Found home search input")
+
+            driver.execute_script(
+                "arguments[0].value = arguments[1]; "
+                "arguments[0].dispatchEvent(new Event('input', { bubbles: true })); "
+                "arguments[0].dispatchEvent(new Event('change', { bubbles: true })); "
+                "arguments[0].focus();",
+                search_input,
+                query
+            )
+            search_input.send_keys(Keys.RETURN)
+            self.logger.info(f"[YOUTUBE] Injected query '{query}' via JS and pressed ENTER")
+            return True
+
+        except Exception as e:
+            self.logger.warning(f"[YOUTUBE] Failed to search from home: {type(e).__name__}: {str(e)[:200]}")
+            self._log_page_state(driver, "home_search_failed", warning=True)
+            return False
+
+    def _wait_for_results_url(self, driver, fallback_url: str):
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline:
+            try:
+                if "youtube.com/results" in driver.current_url:
+                    return
+            except Exception:
+                pass
+            time.sleep(0.3)
+
+        self.logger.warning("[YOUTUBE] Search did not reach results URL; loading fallback URL")
+        driver.get(fallback_url)
+        time.sleep(1.5)
 
     def _open_search_suggestions(self, driver_wrapper) -> bool:
         driver = driver_wrapper.driver
@@ -112,6 +167,7 @@ class Scraper:
             )
             if not found:
                 self.logger.warning("[YOUTUBE] Search input was not found via JS")
+                self._log_page_state(driver, "results_search_input_not_found", warning=True)
                 return False
 
             self.logger.info(f"[YOUTUBE] Found input via JS: {found[:200]}")
@@ -151,7 +207,10 @@ class Scraper:
         var selectors = [
             'input[name="search_query"]',
             'input#search',
-            'input.ytSearchboxComponentInput'
+            'input.ytSearchboxComponentInput',
+            'ytd-searchbox input',
+            'yt-searchbox input',
+            'form[role="search"] input'
         ];
         var inputs = [];
         selectors.forEach(function(selector) {{
@@ -166,6 +225,48 @@ class Scraper:
         if (!input) return null;
         {body}
         """
+
+    def _log_page_state(self, driver, label: str, warning: bool = False):
+        try:
+            state = driver.execute_script(
+                """
+                var inputs = Array.from(document.querySelectorAll('input')).slice(0, 12).map(function(el) {
+                    var rect = el.getBoundingClientRect();
+                    return {
+                        name: el.getAttribute('name') || '',
+                        id: el.id || '',
+                        cls: el.className || '',
+                        type: el.type || '',
+                        placeholder: el.getAttribute('placeholder') || '',
+                        aria: el.getAttribute('aria-label') || '',
+                        width: Math.round(rect.width),
+                        height: Math.round(rect.height),
+                        visible: rect.width > 0 && rect.height > 0
+                    };
+                });
+                var bodyText = (document.body && document.body.innerText || '').replace(/\\s+/g, ' ').trim();
+                return {
+                    href: location.href,
+                    readyState: document.readyState,
+                    title: document.title,
+                    inputCount: document.querySelectorAll('input').length,
+                    ytdApp: !!document.querySelector('ytd-app'),
+                    searchboxCount: document.querySelectorAll('ytd-searchbox, yt-searchbox, input[name="search_query"], input#search').length,
+                    suggestionsCount: document.querySelectorAll('div.ytSuggestionComponentSuggestion, [role="option"], li.sbsb_c').length,
+                    inputs: inputs,
+                    bodyPreview: bodyText.slice(0, 300)
+                };
+                """
+            )
+            log = self.logger.warning if warning else self.logger.info
+            log(f"[YOUTUBE_DEBUG] {label}: {state}")
+        except Exception as e:
+            try:
+                current_url = driver.current_url
+            except Exception:
+                current_url = "unavailable"
+            log = self.logger.warning if warning else self.logger.info
+            log(f"[YOUTUBE_DEBUG] {label}: state capture failed ({type(e).__name__}); current_url={current_url}")
 
     def _refresh_suggestions_with_keyboard(self, driver_wrapper):
         """focus된 검색창에 입력 이벤트를 만들어 suggestion dropdown을 다시 열도록 유도한다."""

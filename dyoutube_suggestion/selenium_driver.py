@@ -23,15 +23,15 @@ def _chrome_service() -> Service:
 
 class SeleniumDriver:
     # 페이지 로드 타임아웃 (초)
-    PAGE_LOAD_TIMEOUT = int(os.environ.get('SELENIUM_PAGE_LOAD_TIMEOUT', '8'))
+    PAGE_LOAD_TIMEOUT = int(os.environ.get('SELENIUM_PAGE_LOAD_TIMEOUT', '30'))
     # 스크립트 실행 타임아웃 (초)
-    SCRIPT_TIMEOUT = int(os.environ.get('SELENIUM_SCRIPT_TIMEOUT', '2'))
+    SCRIPT_TIMEOUT = int(os.environ.get('SELENIUM_SCRIPT_TIMEOUT', '5'))
     # 명시적 페이지 준비 대기 시간 (초)
     DOCUMENT_READY_TIMEOUT = float(os.environ.get('SELENIUM_DOCUMENT_READY_TIMEOUT', '10'))
-    YOUTUBE_DOCUMENT_READY_TIMEOUT = float(os.environ.get('SELENIUM_YOUTUBE_DOCUMENT_READY_TIMEOUT', '4'))
+    YOUTUBE_DOCUMENT_READY_TIMEOUT = float(os.environ.get('SELENIUM_YOUTUBE_DOCUMENT_READY_TIMEOUT', '10'))
     # URL 전환 후 동적 DOM이 채워질 최소 대기 시간 (초)
     PAGE_STABILIZE_DELAY = float(os.environ.get('SELENIUM_PAGE_STABILIZE_DELAY', '2.5'))
-    YOUTUBE_PAGE_STABILIZE_DELAY = float(os.environ.get('SELENIUM_YOUTUBE_PAGE_STABILIZE_DELAY', '1.0'))
+    YOUTUBE_PAGE_STABILIZE_DELAY = float(os.environ.get('SELENIUM_YOUTUBE_PAGE_STABILIZE_DELAY', '2.0'))
     # YouTube SPA hydration을 위해 기본적으로 페이지 로딩을 강제 중단하지 않는다.
     STOP_LOADING_AFTER_NAVIGATE = os.environ.get('SELENIUM_STOP_LOADING_AFTER_NAVIGATE', 'false').lower() == 'true'
     # YouTube는 DOM.getOuterHTML이 renderer/network 상태에 묶여 길게 block될 수 있어 URL 기반 검증을 기본 사용한다.
@@ -52,12 +52,13 @@ class SeleniumDriver:
         # Set binary location if it exists (e.g. inside Docker) to prevent Selenium Manager from downloading it
         if os.path.isfile('/usr/bin/google-chrome'):
             options.binary_location = '/usr/bin/google-chrome'
-        options.add_argument('--headless=new')
-        options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36")
+        options.add_argument(os.environ.get('SELENIUM_HEADLESS_ARGUMENT', '--headless'))
+        user_agent = os.environ.get('SELENIUM_USER_AGENT')
+        if user_agent:
+            options.add_argument(f"user-agent={user_agent}")
         options.add_argument('--window-size=1920,1080')
         options.add_argument('--disable-gpu')
         options.add_argument('--disable-software-rasterizer')
-        options.add_argument('--disable-features=VizDisplayCompositor')
         options.add_argument('--no-sandbox')
         options.add_argument('--disable-sync')
         #options.add_argument('--disable-background-networking')
@@ -77,9 +78,8 @@ class SeleniumDriver:
         options.add_argument('--blink-settings=imagesEnabled=false')  # Disable images
         options.add_argument('--disable-features=SearchProviderFirstRun')
         options.add_argument('--disable-geolocation')
-        options.add_argument('--disable-gpu-sandbox')
         options.add_argument('--disable-blink-features=AutomationControlled')
-        options.page_load_strategy = 'none'  # driver.get 대기 대신 load_url에서 명시적으로 검증
+        options.page_load_strategy = os.environ.get('SELENIUM_PAGE_LOAD_STRATEGY', 'eager')
         
         prefs = {
             "profile.managed_default_content_settings.images": 2,  # Disable images
@@ -243,10 +243,10 @@ class SeleniumDriver:
             raise
 
     def _navigate_with_cdp(self, url: str):
-        """URL로 이동합니다. YouTube는 renderer가 오래 붙잡히지 않도록 location 변경만 시작합니다."""
+        """URL로 이동합니다. YouTube는 dyoutube-us와 같은 driver.get/eager 흐름을 사용합니다."""
         try:
             if self._should_fast_validate(url):
-                self.driver.execute_script("window.location.href = arguments[0];", url)
+                self.driver.get(url)
                 return
 
             self.driver.execute_cdp_cmd("Page.navigate", {"url": url})
