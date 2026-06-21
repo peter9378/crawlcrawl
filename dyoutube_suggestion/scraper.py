@@ -29,9 +29,33 @@ class Scraper:
         if not query:
             return self._build_suggestion_response(query, [])
 
-        base_url = f"https://www.youtube.com/results?search_query={quote(query)}"
+        encoded_query = quote(query)
+        base_urls = [
+            f"https://www.youtube.com/results?search_query={encoded_query}",
+            f"https://youtube.com/results?search_query={encoded_query}",
+        ]
         suggestions = []
+        last_error = None
 
+        for base_url in base_urls:
+            try:
+                suggestions = self._get_suggestions_from_url(query, base_url)
+                result = self._build_suggestion_response(query, suggestions)
+                self.logger.info(f"[YOUTUBE] Final suggestion result: {result}")
+                return result
+            except Exception as e:
+                last_error = e
+                self.logger.warning(f"[YOUTUBE] Suggestion crawl failed for {base_url}: {e}")
+
+        if last_error:
+            self.logger.error(f"[YOUTUBE] Error in get_suggestions: {last_error}")
+            self.logger.error(traceback.format_exc())
+            raise last_error
+
+        return self._build_suggestion_response(query, [])
+
+    def _get_suggestions_from_url(self, query: str, base_url: str):
+        suggestions = []
         try:
             self.logger.info(f"[YOUTUBE] Getting suggestions for: {query}")
             pool = get_driver_pool()
@@ -59,12 +83,10 @@ class Scraper:
                 if not suggestions:
                     self.logger.warning("[YOUTUBE] No suggestion dropdown found on youtube.com page")
 
-            result = self._build_suggestion_response(query, suggestions)
-            self.logger.info(f"[YOUTUBE] Final suggestion result: {result}")
-            return result
+            return suggestions
 
         except Exception as e:
-            self.logger.error(f"[YOUTUBE] Error in get_suggestions: {e}")
+            self.logger.error(f"[YOUTUBE] Error while crawling {base_url}: {e}")
             self.logger.error(traceback.format_exc())
             raise
 

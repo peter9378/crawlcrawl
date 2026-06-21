@@ -10,8 +10,19 @@ import time
 import os
 import traceback
 import logging
+import random
+import socket
+import struct
 
 CHROMEDRIVER_PATH = os.environ.get('CHROMEDRIVER_PATH', '/usr/local/bin/chromedriver')
+YOUTUBE_HOSTS = ("www.youtube.com", "youtube.com", "m.youtube.com")
+PUBLIC_DNS_SERVERS = ("8.8.8.8", "1.1.1.1", "9.9.9.9")
+DEFAULT_YOUTUBE_FALLBACK_IPS = (
+    "142.250.190.78",
+    "142.251.32.46",
+    "172.217.174.110",
+    "216.58.220.110",
+)
 
 
 def _chrome_service() -> Service:
@@ -42,8 +53,8 @@ class SeleniumDriver:
     def __init__(self, start_url='about:blank'):
         self.driver = None
         self.start_url = start_url
-        self.options = self._get_options()
         self.logger = logging.getLogger('uvicorn')
+        self.options = self._get_options()
 
     def _get_options(self):
         options = ChromeOptions()
@@ -70,6 +81,10 @@ class SeleniumDriver:
         options.add_argument('--blink-settings=imagesEnabled=false')  # Disable images
         options.add_argument('--disable-features=SearchProviderFirstRun')
         options.add_argument('--disable-geolocation')
+        host_resolver_rules = self._build_host_resolver_rules()
+        if host_resolver_rules:
+            options.add_argument(f'--host-resolver-rules={host_resolver_rules}')
+            self.logger.info(f"[SELENIUM] Applying Chrome host resolver rules: {host_resolver_rules}")
         options.page_load_strategy = 'eager'
         
         prefs = {
@@ -80,6 +95,117 @@ class SeleniumDriver:
         }
         options.add_experimental_option("prefs", prefs)
         return options
+
+    def _build_host_resolver_rules(self):
+        if os.environ.get("YOUTUBE_DISABLE_HOST_RESOLVER_RULES") == "1":
+            return ""
+
+        explicit_rules = os.environ.get("YOUTUBE_HOST_RESOLVER_RULES")
+        if explicit_rules:
+            return explicit_rules
+
+        ip = os.environ.get("YOUTUBE_HOST_IP") or self._resolve_youtube_ip()
+        if not ip:
+            fallback_ips = [
+                item.strip()
+                for item in os.environ.get(
+                    "YOUTUBE_FALLBACK_IPS",
+                    ",".join(DEFAULT_YOUTUBE_FALLBACK_IPS)
+                ).split(",")
+                if item.strip()
+            ]
+            ip = fallback_ips[0] if fallback_ips else ""
+            if ip:
+                self.logger.warning(f"[SELENIUM] Using fallback YouTube IP for Chrome resolver: {ip}")
+
+        if not ip:
+            return ""
+
+        rules = [f"MAP {host} {ip}" for host in YOUTUBE_HOSTS]
+        rules.append("EXCLUDE localhost")
+        rules.append("EXCLUDE 127.0.0.1")
+        return ",".join(rules)
+
+    def _resolve_youtube_ip(self):
+        for resolver in (self._resolve_with_public_dns, self._resolve_with_system_dns):
+            try:
+                ip = resolver("www.youtube.com")
+                if ip:
+                    return ip
+            except Exception as e:
+                self.logger.debug(f"[SELENIUM] YouTube resolver {resolver.__name__} failed: {e}")
+        return ""
+
+    def _resolve_with_system_dns(self, host):
+        infos = socket.getaddrinfo(host, 443, socket.AF_INET, socket.SOCK_STREAM)
+        for info in infos:
+            address = info[4][0]
+            if address:
+                return address
+        return ""
+
+    def _resolve_with_public_dns(self, host):
+        query_id = random.randint(0, 65535)
+        packet = self._build_dns_query(host, query_id)
+
+        for server in PUBLIC_DNS_SERVERS:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            try:
+                sock.settimeout(2.0)
+                sock.sendto(packet, (server, 53))
+                data, _ = sock.recvfrom(512)
+                ip = self._parse_dns_a_response(data, query_id)
+                if ip:
+                    self.logger.info(f"[SELENIUM] Resolved www.youtube.com via DNS {server}: {ip}")
+                    return ip
+            except Exception as e:
+                self.logger.debug(f"[SELENIUM] Public DNS {server} failed: {e}")
+            finally:
+                sock.close()
+        return ""
+
+    def _build_dns_query(self, host, query_id):
+        flags = 0x0100
+        qdcount = 1
+        header = struct.pack("!HHHHHH", query_id, flags, qdcount, 0, 0, 0)
+        qname = b"".join(bytes([len(part)]) + part.encode("ascii") for part in host.split(".")) + b"\x00"
+        question = qname + struct.pack("!HH", 1, 1)
+        return header + question
+
+    def _parse_dns_a_response(self, data, query_id):
+        if len(data) < 12:
+            return ""
+
+        response_id, _flags, qdcount, ancount, _nscount, _arcount = struct.unpack("!HHHHHH", data[:12])
+        if response_id != query_id:
+            return ""
+
+        offset = 12
+        for _ in range(qdcount):
+            offset = self._skip_dns_name(data, offset)
+            offset += 4
+
+        for _ in range(ancount):
+            offset = self._skip_dns_name(data, offset)
+            if offset + 10 > len(data):
+                return ""
+            rtype, rclass, _ttl, rdlength = struct.unpack("!HHIH", data[offset:offset + 10])
+            offset += 10
+            rdata = data[offset:offset + rdlength]
+            offset += rdlength
+            if rtype == 1 and rclass == 1 and rdlength == 4:
+                return socket.inet_ntoa(rdata)
+        return ""
+
+    def _skip_dns_name(self, data, offset):
+        while offset < len(data):
+            length = data[offset]
+            if length == 0:
+                return offset + 1
+            if length & 0xC0 == 0xC0:
+                return offset + 2
+            offset += 1 + length
+        return offset
 
     def set_up(self):
         """드라이버 초기화 및 페이지 로드
@@ -239,7 +365,8 @@ class SeleniumDriver:
                     f"[SELENIUM] Target URL load attempt {attempt}/{self.NAVIGATION_RETRIES} failed: {e}"
                 )
                 if attempt < self.NAVIGATION_RETRIES:
-                    self._reset_to_blank_quietly()
+                    self.logger.info("[SELENIUM] Restarting driver before next target URL attempt")
+                    self.restart_driver()
                     time.sleep(self.NAVIGATION_RETRY_DELAY * attempt)
 
         error_msg = f"[SELENIUM] Failed to load target URL after {self.NAVIGATION_RETRIES} attempts: {url}"
