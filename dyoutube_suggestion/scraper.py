@@ -37,7 +37,7 @@ class Scraper:
             self.logger.info(f"[YOUTUBE] Starting youtube.com suggestion crawl for: {query}")
             pool = get_driver_pool()
 
-            with pool.get_driver(home_url) as driver_wrapper:
+            with pool.get_driver("about:blank") as driver_wrapper:
                 driver = driver_wrapper.driver
                 self._set_korean_locale(driver_wrapper)
 
@@ -73,28 +73,18 @@ class Scraper:
     def _set_korean_locale(self, driver_wrapper):
         driver = driver_wrapper.driver
         try:
-            driver.add_cookie({
+            driver.execute_cdp_cmd("Network.setCookie", {
                 "name": "PREF",
                 "value": "hl=ko&gl=KR",
                 "domain": ".youtube.com",
                 "path": "/",
+                "url": "https://www.youtube.com/",
             })
             driver_wrapper.load_url("https://www.youtube.com")
-            self.logger.info("[YOUTUBE] Cookie for KR/ko set and home page reloaded")
+            self.logger.info("[YOUTUBE] Cookie for KR/ko set via CDP and home page loaded")
         except Exception as e:
-            self.logger.warning(f"[YOUTUBE] Failed to set KR/ko cookie with WebDriver: {e}")
-            try:
-                driver.execute_cdp_cmd("Network.setCookie", {
-                    "name": "PREF",
-                    "value": "hl=ko&gl=KR",
-                    "domain": ".youtube.com",
-                    "path": "/",
-                    "url": "https://www.youtube.com/",
-                })
-                driver_wrapper.load_url("https://www.youtube.com")
-                self.logger.info("[YOUTUBE] Cookie for KR/ko set via CDP and home page reloaded")
-            except Exception as cdp_error:
-                self.logger.warning(f"[YOUTUBE] Failed to set KR/ko cookie via CDP: {cdp_error}")
+            self.logger.warning(f"[YOUTUBE] Failed to set KR/ko cookie via CDP: {e}")
+            driver_wrapper.load_url("https://www.youtube.com")
 
     def _submit_search_from_home(self, driver_wrapper, query: str) -> bool:
         driver = driver_wrapper.driver
@@ -420,29 +410,6 @@ class Scraper:
             if suggestions:
                 return suggestions
 
-            html_content = driver_wrapper.get_page_source()
-            if not html_content:
-                return suggestions
-
-            soup = BeautifulSoup(html_content, "html.parser")
-            selectors = [
-                'div.ytSuggestionComponentSuggestion div.ytSuggestionComponentText',
-                '[role="option"]',
-                'li.sbsb_c .sbqs_c',
-                'li.sbsb_c'
-            ]
-
-            seen = set()
-            for selector in selectors:
-                for element in soup.select(selector):
-                    text = " ".join(element.get_text(" ", strip=True).split())
-                    if text and text not in seen:
-                        suggestions.append(text)
-                        seen.add(text)
-
-                if suggestions:
-                    break
-                    
         except Exception as e:
             self.logger.warning(f"[YOUTUBE] Error extracting suggestion texts: {e}")
         

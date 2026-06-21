@@ -194,9 +194,12 @@ class SeleniumDriverPool:
                 f"restart in {remaining} requests)"
             )
             
-            # URL 로드
-            self.logger.info(f"[POOL] {thread_id}: Loading URL: {url}")
-            driver.load_url(url)
+            # URL 로드. about:blank는 호출자가 직접 초기 URL을 제어할 때 사용한다.
+            if url and url != "about:blank":
+                self.logger.info(f"[POOL] {thread_id}: Loading URL: {url}")
+                driver.load_url(url)
+            else:
+                self.logger.info(f"[POOL] {thread_id}: Initial URL load skipped: {url}")
             
             # 드라이버를 사용자에게 제공
             yield driver

@@ -10,6 +10,7 @@ import time
 import os
 import traceback
 import logging
+from urllib.parse import urlparse
 
 CHROMEDRIVER_PATH = os.environ.get('CHROMEDRIVER_PATH', '/usr/local/bin/chromedriver')
 
@@ -31,6 +32,8 @@ class SeleniumDriver:
     PAGE_STABILIZE_DELAY = float(os.environ.get('SELENIUM_PAGE_STABILIZE_DELAY', '2.5'))
     # YouTube SPA hydration을 위해 기본적으로 페이지 로딩을 강제 중단하지 않는다.
     STOP_LOADING_AFTER_NAVIGATE = os.environ.get('SELENIUM_STOP_LOADING_AFTER_NAVIGATE', 'false').lower() == 'true'
+    # YouTube는 DOM.getOuterHTML이 renderer/network 상태에 묶여 길게 block될 수 있어 URL 기반 검증을 기본 사용한다.
+    FAST_VALIDATE_YOUTUBE = os.environ.get('SELENIUM_FAST_VALIDATE_YOUTUBE', 'true').lower() == 'true'
     # 빈 문서로 간주할 최소 HTML 길이
     MIN_PAGE_SOURCE_LENGTH = 100
     # 암묵적 대기 시간 (초)
@@ -221,7 +224,10 @@ class SeleniumDriver:
             time.sleep(self.PAGE_STABILIZE_DELAY)
             if self.STOP_LOADING_AFTER_NAVIGATE:
                 self._stop_loading()
-            self._validate_page_source(url)
+            if self._should_fast_validate(url):
+                self._validate_current_url(url)
+            else:
+                self._validate_page_source(url)
             self.logger.info("[SELENIUM] Target URL loaded successfully")
 
         except TimeoutException as e:
@@ -272,6 +278,29 @@ class SeleniumDriver:
         self.logger.info(
             f"[SELENIUM] Loaded document validated: "
             f"current_url={current_url}, source_length={len(html_content)}"
+        )
+
+    def _should_fast_validate(self, url: str) -> bool:
+        if not self.FAST_VALIDATE_YOUTUBE:
+            return False
+
+        try:
+            hostname = urlparse(url).hostname or ""
+        except Exception:
+            return False
+
+        return hostname == "youtube.com" or hostname.endswith(".youtube.com")
+
+    def _validate_current_url(self, url: str):
+        """YouTube SPA용 경량 검증. 전체 HTML 추출은 renderer 대기 때문에 피한다."""
+        current_url = self._safe_current_url()
+        if current_url == "about:blank" or not current_url.startswith(("http://", "https://")):
+            raise WebDriverException(
+                f"[SELENIUM] Loaded document URL is invalid for {url}; current_url={current_url}"
+            )
+
+        self.logger.info(
+            f"[SELENIUM] Loaded document URL validated: current_url={current_url}"
         )
 
     def _stop_loading(self):
