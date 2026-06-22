@@ -26,7 +26,7 @@ class Scraper:
         "yt-searchbox input",
         "form[role='search'] input",
     )
-    YOUTUBE_HOME_URL = "https://youtube.com"
+    YOUTUBE_HOME_URL = "https://www.youtube.com"
 
     def __init__(self):
         self.logger = logging.getLogger("uvicorn")
@@ -157,10 +157,9 @@ class Scraper:
     def _crawl_suggestions(self, page: ChromiumPage, query: str):
         self.logger.info(f"[YOUTUBE] Starting DrissionPage crawl for: {query}")
 
-        home_url = self.YOUTUBE_HOME_URL
-        self.logger.info(f"[YOUTUBE] Opening YouTube home: {home_url}")
         self._set_locale_cookies_via_cdp(page)
-        nav_result = self._load_youtube_home(page, home_url)
+        self.logger.info(f"[YOUTUBE] Opening YouTube home: {self.YOUTUBE_HOME_URL}")
+        nav_result = self._load_youtube_page(page, self.YOUTUBE_HOME_URL)
         self.logger.info(f"[YOUTUBE] YouTube home navigation result: {nav_result}")
         if self._is_chrome_error_page(page):
             self._log_page_state(page, "home_chrome_error")
@@ -180,29 +179,23 @@ class Scraper:
             self._dump_debug_artifacts(page, query, "home_search_input_not_found")
             raise RuntimeError("YouTube home search input not found")
 
-        self._submit_search(page, search_input, query)
+        self._paste_keyword_and_submit(page, search_input, query)
         if self._is_chrome_error_page(page):
             self._log_page_state(page, "after_search_chrome_error")
             raise RuntimeError("YouTube search opened as a Chrome error page")
-        if not self._wait_for_results_page(page, query):
+        if not self._wait_for_results_page(page):
             self._dump_debug_artifacts(page, query, "results_page_not_loaded")
             raise RuntimeError(f"YouTube search results page did not load: {self._page_url(page)}")
         self._log_page_state(page, "results_loaded")
 
-        results_input = self._find_search_input(page, self.input_timeout_seconds)
-        if not results_input:
-            self._dump_debug_artifacts(page, query, "results_search_input_not_found")
-            raise RuntimeError("YouTube results search input not found")
+        suggestions = self._extract_dropdown_suggestions(page)
+        if suggestions:
+            self.logger.info(f"[YOUTUBE] Suggestions found in results HTML: {suggestions}")
+            return self._expand_ellipsis_suggestions(suggestions, query)
 
-        self._click_results_search_box(page, results_input)
-        suggestions = self._wait_for_dropdown_suggestions(page)
-        if not suggestions:
-            self._trigger_dropdown_refresh(page)
-            suggestions = self._wait_for_dropdown_suggestions(page)
-        if not suggestions:
-            self._dump_debug_artifacts(page, query, "suggestions_not_found")
-            self.logger.warning("[YOUTUBE] Dropdown suggestions were not found after clicking results search box")
-        return self._expand_ellipsis_suggestions(suggestions, query)
+        self._dump_debug_artifacts(page, query, "suggestions_not_found")
+        self.logger.warning("[YOUTUBE] Suggestion HTML was not found in results page")
+        return []
 
     def _open_page(self, profile_dir: str):
         co = ChromiumOptions()
@@ -247,19 +240,19 @@ class Scraper:
         )
         return page
 
-    def _load_youtube_home(self, page: ChromiumPage, home_url: str):
+    def _load_youtube_page(self, page: ChromiumPage, url: str):
         last_result = None
         last_error = None
         for attempt in range(1, 3):
             try:
-                last_result = page.get(home_url, timeout=self.page_timeout_seconds, retry=0)
+                last_result = page.get(url, timeout=self.page_timeout_seconds, retry=0)
                 self.logger.info(
-                    f"[YOUTUBE] Home navigation attempt {attempt}/2 returned: {last_result}, "
+                    f"[YOUTUBE] Page navigation attempt {attempt}/2 returned: {last_result}, "
                     f"url={self._page_url(page)}"
                 )
             except Exception as e:
                 last_error = e
-                self.logger.warning(f"[YOUTUBE] Home navigation attempt {attempt}/2 failed: {e}")
+                self.logger.warning(f"[YOUTUBE] Page navigation attempt {attempt}/2 failed: {e}")
                 self._stop_loading(page)
 
             if self._is_chrome_error_page(page):
@@ -267,13 +260,13 @@ class Scraper:
             if self._wait_for_youtube_dom(page, 5.0):
                 return last_result
 
-            self._log_page_state(page, f"home_attempt_{attempt}_dom_empty")
+            self._log_page_state(page, f"page_attempt_{attempt}_dom_empty")
             if attempt < 2:
                 self._stop_loading(page)
                 self._short_wait(0.8, 1.2)
 
         if last_error:
-            raise RuntimeError(f"YouTube home navigation failed: {last_error}") from last_error
+            raise RuntimeError(f"YouTube page navigation failed: {last_error}") from last_error
         return last_result
 
     def _set_locale_cookies_via_cdp(self, page: ChromiumPage):
@@ -294,9 +287,9 @@ class Scraper:
                     path="/",
                     secure=True,
                     expires=expires,
-                    url="https://youtube.com/",
+                    url="https://www.youtube.com/",
                 )
-            self.logger.info("[YOUTUBE] Locale cookies primed via CDP for youtube.com")
+            self.logger.info("[YOUTUBE] Locale cookies primed via CDP for www.youtube.com")
         except Exception as e:
             self.logger.warning(f"[YOUTUBE] Failed to prime locale cookies via CDP: {e}")
 
@@ -314,6 +307,7 @@ class Scraper:
                 """
                 return !!(
                     document.querySelector("input[name='search_query'], input#search, input.ytSearchboxComponentInput") ||
+                    document.querySelector('.ytSearchboxComponentSuggestionsContainer, div[role="listbox"]') ||
                     document.querySelector('ytd-app') ||
                     document.querySelector('yt-searchbox, ytd-searchbox')
                 );
@@ -433,16 +427,66 @@ class Scraper:
         self.logger.warning(f"[YOUTUBE] Search input not found within {timeout}s; last_error={last_error}")
         return None
 
-    def _submit_search(self, page: ChromiumPage, search_input, query: str):
-        search_input.click()
-        self._short_wait(0.2, 0.45)
-        self._clear_search_input(page, search_input)
+    def _paste_keyword_and_submit(self, page: ChromiumPage, search_input, query: str):
+        try:
+            search_input.click()
+        except Exception as e:
+            self.logger.warning(f"[YOUTUBE] Native home search box click failed: {e}")
 
-        for char in query:
-            search_input.input(char)
-            time.sleep(random.uniform(0.02, 0.07))
-        self._short_wait(0.35, 0.75)
+        query_json = json.dumps(query, ensure_ascii=False)
+        script = """
+        const query = __QUERY__;
+        const el = document.querySelector("input[name='search_query'], input#search, input.ytSearchboxComponentInput");
+        if (!el) return {ok: false, reason: 'input_not_found'};
+        const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+        el.scrollIntoView({block: 'center', inline: 'center'});
+        el.focus();
+        el.select && el.select();
+        if (setter) {
+            setter.call(el, '');
+        } else {
+            el.value = '';
+        }
+        el.dispatchEvent(new Event('input', {bubbles: true}));
+        el.dispatchEvent(new Event('change', {bubbles: true}));
 
+        try {
+            const data = new DataTransfer();
+            data.setData('text/plain', query);
+            el.dispatchEvent(new ClipboardEvent('paste', {
+                bubbles: true,
+                cancelable: true,
+                clipboardData: data
+            }));
+        } catch (e) {
+            // ClipboardEvent construction can fail in some Chrome builds.
+        }
+
+        if (setter) {
+            setter.call(el, query);
+        } else {
+            el.value = query;
+        }
+        el.dispatchEvent(new InputEvent('input', {
+            bubbles: true,
+            cancelable: true,
+            inputType: 'insertFromPaste',
+            data: query
+        }));
+        el.dispatchEvent(new Event('change', {bubbles: true}));
+        return {
+            ok: true,
+            value: el.value,
+            activeTag: document.activeElement && document.activeElement.tagName
+        };
+        """.replace("__QUERY__", query_json)
+        try:
+            state = page.run_js(script)
+            self.logger.info(f"[YOUTUBE] Keyword pasted into home search box: {state}")
+        except Exception as e:
+            self.logger.warning(f"[YOUTUBE] JS paste into home search box failed: {e}")
+
+        self._short_wait(0.35, 0.7)
         submitted = False
         try:
             search_input.input("\n")
@@ -451,7 +495,7 @@ class Scraper:
             self.logger.warning(f"[YOUTUBE] Enter submit failed: {e}")
 
         if not submitted:
-            script = """
+            click_script = """
             const button = document.querySelector('button#search-icon-legacy, ytd-searchbox button, yt-searchbox button');
             if (button) {
                 button.click();
@@ -459,34 +503,15 @@ class Scraper:
             }
             return false;
             """
-            submitted = bool(page.run_js(script))
+            try:
+                submitted = bool(page.run_js(click_script))
+            except Exception as e:
+                self.logger.warning(f"[YOUTUBE] Search button submit failed: {e}")
 
-        self.logger.info(f"[YOUTUBE] Search submitted: {submitted}")
+        self.logger.info(f"[YOUTUBE] Home search submitted: {submitted}")
         self._short_wait(2.0, 3.0)
 
-    def _clear_search_input(self, page: ChromiumPage, search_input):
-        try:
-            page.run_js(
-                """
-                const el = document.querySelector("input[name='search_query'], input#search, input.ytSearchboxComponentInput");
-                if (el) {
-                    el.focus();
-                    el.value = '';
-                    el.dispatchEvent(new Event('input', {bubbles: true}));
-                    el.dispatchEvent(new Event('change', {bubbles: true}));
-                    return true;
-                }
-                return false;
-                """
-            )
-        except Exception:
-            pass
-        try:
-            search_input.clear()
-        except Exception:
-            pass
-
-    def _wait_for_results_page(self, page: ChromiumPage, query: str):
+    def _wait_for_results_page(self, page: ChromiumPage):
         deadline = time.time() + self.page_timeout_seconds
         last_url = ""
         while time.time() < deadline:
@@ -498,77 +523,6 @@ class Scraper:
                 return True
             self._short_wait(0.25, 0.5)
         return False
-
-    def _click_results_search_box(self, page: ChromiumPage, search_input):
-        try:
-            search_input.click()
-        except Exception as e:
-            self.logger.warning(f"[YOUTUBE] Native search box click failed: {e}")
-
-        script = """
-        const el = document.querySelector("input[name='search_query'], input#search, input.ytSearchboxComponentInput");
-        if (!el) return false;
-        el.scrollIntoView({block: 'center', inline: 'center'});
-        el.focus();
-        for (const type of ['pointerdown', 'mousedown', 'mouseup', 'click']) {
-            el.dispatchEvent(new MouseEvent(type, {bubbles: true, cancelable: true, view: window}));
-        }
-        return true;
-        """
-        try:
-            page.run_js(script)
-        except Exception as e:
-            self.logger.warning(f"[YOUTUBE] JS search box click failed: {e}")
-        self._short_wait(0.5, 0.9)
-        self._log_page_state(page, "results_search_box_clicked")
-
-    def _trigger_dropdown_refresh(self, page: ChromiumPage):
-        script = """
-        const el = document.querySelector("input[name='search_query'], input#search, input.ytSearchboxComponentInput");
-        if (!el) return {ok: false, reason: 'input_not_found'};
-
-        const value = el.value || '';
-        const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
-        el.focus();
-        el.click();
-        el.dispatchEvent(new Event('input', {bubbles: true}));
-        el.dispatchEvent(new Event('change', {bubbles: true}));
-
-        if (setter && value) {
-            setter.call(el, `${value} `);
-            el.dispatchEvent(new InputEvent('input', {bubbles: true, inputType: 'insertText', data: ' '}));
-            setter.call(el, value);
-            el.dispatchEvent(new InputEvent('input', {bubbles: true, inputType: 'deleteContentBackward', data: null}));
-        }
-
-        return {
-            ok: true,
-            value,
-            activeTag: document.activeElement && document.activeElement.tagName,
-            activeName: document.activeElement && document.activeElement.getAttribute('name'),
-            controls: el.getAttribute('aria-controls') || '',
-            expanded: el.getAttribute('aria-expanded') || ''
-        };
-        """
-        try:
-            state = page.run_js(script)
-            self.logger.info(f"[YOUTUBE] Dropdown refresh event dispatched: {state}")
-            self._short_wait(0.4, 0.8)
-            self._log_page_state(page, "dropdown_refresh_dispatched")
-        except Exception as e:
-            self.logger.warning(f"[YOUTUBE] Dropdown refresh failed: {e}")
-
-    def _wait_for_dropdown_suggestions(self, page: ChromiumPage):
-        deadline = time.time() + self.dropdown_timeout_seconds
-        suggestions = []
-        while time.time() < deadline:
-            suggestions = self._extract_dropdown_suggestions(page)
-            if suggestions:
-                self.logger.info(f"[YOUTUBE] Dropdown suggestions found: {suggestions}")
-                return suggestions
-            self._short_wait(0.2, 0.35)
-        self.logger.warning(f"[YOUTUBE] Dropdown suggestions not found within {self.dropdown_timeout_seconds}s")
-        return suggestions
 
     def _extract_dropdown_suggestions(self, page: ChromiumPage):
         script = """

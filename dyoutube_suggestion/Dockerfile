@@ -4,9 +4,7 @@ FROM rockylinux:9
 ARG TARGETARCH
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Keep package installation stable on Rocky Linux builders.
-RUN echo "ip_resolve=4" >> /etc/dnf/dnf.conf && \
-    echo "timeout=15" >> /etc/dnf/dnf.conf && \
+RUN echo "timeout=15" >> /etc/dnf/dnf.conf && \
     echo "retries=5" >> /etc/dnf/dnf.conf && \
     sed -i 's/^mirrorlist=/#mirrorlist=/g' /etc/yum.repos.d/rocky*.repo 2>/dev/null || true && \
     sed -i 's/^#baseurl=http/baseurl=http/g' /etc/yum.repos.d/rocky*.repo 2>/dev/null || true && \
@@ -47,7 +45,7 @@ RUN if [ "$TARGETARCH" != "amd64" ]; then \
         echo "google-chrome-stable RPM supports amd64 only; build with --platform linux/amd64"; \
         exit 1; \
     fi && \
-    wget -q --inet4-only https://dl.google.com/linux/direct/google-chrome-stable_current_x86_64.rpm \
+    wget -q https://dl.google.com/linux/direct/google-chrome-stable_current_x86_64.rpm \
         -O /tmp/chrome.rpm && \
     dnf install -y --allowerasing /tmp/chrome.rpm && \
     rm -f /tmp/chrome.rpm && \
