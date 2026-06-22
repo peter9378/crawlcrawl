@@ -4,6 +4,9 @@ import os
 import random
 import re
 import shutil
+import socket
+import ssl
+import struct
 import subprocess
 import sys
 import tempfile
@@ -14,6 +17,20 @@ from DrissionPage import ChromiumOptions, ChromiumPage
 
 
 class Scraper:
+    YOUTUBE_HOSTS = (
+        "www.youtube.com",
+        "youtube.com",
+        "m.youtube.com",
+        "*.youtube.com",
+        "i.ytimg.com",
+        "yt3.ggpht.com",
+        "youtubei.googleapis.com",
+    )
+    PUBLIC_DNS_SERVERS = ("8.8.8.8", "1.1.1.1", "9.9.9.9")
+    DOH_PROVIDERS = (
+        ("dns.google", ("8.8.8.8", "8.8.4.4"), "/resolve?name={host}&type=A"),
+        ("cloudflare-dns.com", ("1.1.1.1", "1.0.0.1"), "/dns-query?name={host}&type=A"),
+    )
     USER_AGENT = (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -34,10 +51,12 @@ class Scraper:
         self.page_timeout_seconds = float(os.getenv("DRISSION_PAGE_TIMEOUT_SECONDS", "30"))
         self.input_timeout_seconds = float(os.getenv("DRISSION_INPUT_TIMEOUT_SECONDS", "15"))
         self.dropdown_timeout_seconds = float(os.getenv("DRISSION_DROPDOWN_TIMEOUT_SECONDS", "6"))
+        self.load_mode = os.getenv("DRISSION_LOAD_MODE", "none")
         self.use_subprocess = (
             os.getenv("DRISSION_CRAWL_SUBPROCESS", "1") != "0"
             and os.getenv("YOUTUBE_DRISSION_CHILD") != "1"
         )
+        self.youtube_host_ip = None
 
     def get_suggestions(self, query: str):
         query = (query or "").strip()
@@ -156,6 +175,7 @@ class Scraper:
         home_url = "https://www.youtube.com/?hl=ko&gl=KR"
         self.logger.info(f"[YOUTUBE] Opening YouTube home: {home_url}")
         page.get(home_url, timeout=self.page_timeout_seconds)
+        self.logger.info(f"[YOUTUBE] YouTube home navigation returned: url={self._page_url(page)}")
         self._set_locale_cookies(page)
         self._short_wait(1.0, 1.8)
         self._accept_consent_if_present(page)
@@ -201,15 +221,20 @@ class Scraper:
             "--no-sandbox",
             "--disable-dev-shm-usage",
             "--disable-gpu",
+            "--disable-quic",
+            "--dns-prefetch-disable",
             "--mute-audio",
             "--disable-notifications",
             "--disable-popup-blocking",
+            "--disable-background-networking",
+            "--disable-component-update",
             "--disable-infobars",
             "--disable-blink-features=AutomationControlled",
             "--disable-features=Translate,MediaRouter",
             "--no-first-run",
             "--no-default-browser-check",
             "--password-store=basic",
+            "--blink-settings=imagesEnabled=false",
             "--lang=ko-KR",
             "--accept-lang=ko-KR,ko,en-US,en",
             f"--user-agent={self.USER_AGENT}",
@@ -221,21 +246,188 @@ class Scraper:
             co.set_argument("--enable-features=DnsOverHttps")
             co.set_argument("--dns-over-https-mode=secure")
             co.set_argument("--dns-over-https-templates=https://dns.google/dns-query")
-            co.set_argument(
-                "--host-resolver-rules=MAP dns.google 8.8.8.8,"
-                "MAP cloudflare-dns.com 1.1.1.1,"
-                "EXCLUDE localhost,EXCLUDE 127.0.0.1"
-            )
+            resolver_rules = self._chrome_host_resolver_rules()
+            if resolver_rules:
+                co.set_argument(f"--host-resolver-rules={resolver_rules}")
+                self.logger.info(f"[YOUTUBE] Chrome host resolver rules: {resolver_rules}")
             self.logger.info("[YOUTUBE] Chrome DNS-over-HTTPS enabled for DrissionPage")
 
+        co.set_load_mode(self.load_mode)
         page = ChromiumPage(co)
         page.set.timeouts(base=self.page_timeout_seconds, page_load=self.page_timeout_seconds)
         self.logger.info(
             "[YOUTUBE] DrissionPage Chromium started: "
             f"chrome={chrome_path or 'default'}, profile={profile_dir}, "
-            f"display={os.getenv('DISPLAY', '')}, headless=False"
+            f"display={os.getenv('DISPLAY', '')}, headless=False, load_mode={self.load_mode}"
         )
         return page
+
+    def _chrome_host_resolver_rules(self):
+        explicit_rules = os.getenv("YOUTUBE_HOST_RESOLVER_RULES", "").strip()
+        if explicit_rules:
+            return explicit_rules
+
+        rules = [
+            "MAP dns.google 8.8.8.8",
+            "MAP cloudflare-dns.com 1.1.1.1",
+        ]
+        ip = os.getenv("YOUTUBE_HOST_IP", "").strip() or self._get_youtube_host_ip()
+        if ip:
+            rules.extend(f"MAP {host} {ip}" for host in self.YOUTUBE_HOSTS)
+        else:
+            self.logger.warning("[YOUTUBE] Could not resolve YouTube IP for Chrome host-resolver-rules")
+        rules.extend(("EXCLUDE localhost", "EXCLUDE 127.0.0.1"))
+        return ",".join(rules)
+
+    def _get_youtube_host_ip(self):
+        if self.youtube_host_ip:
+            return self.youtube_host_ip
+        ip = self._resolve_youtube_ip()
+        self.youtube_host_ip = ip
+        return ip
+
+    def _resolve_youtube_ip(self):
+        host = "www.youtube.com"
+        try:
+            ip = socket.gethostbyname(host)
+            if ip:
+                self.logger.info(f"[YOUTUBE] Resolved {host} via system DNS: {ip}")
+                return ip
+        except OSError as e:
+            self.logger.info(f"[YOUTUBE] System DNS lookup failed for {host}: {e}")
+
+        for server in self.PUBLIC_DNS_SERVERS:
+            for protocol in ("udp", "tcp"):
+                try:
+                    ip = self._resolve_a_record(host, server, protocol)
+                    if ip:
+                        self.logger.info(f"[YOUTUBE] Resolved {host} via DNS {server}/{protocol}: {ip}")
+                        return ip
+                except Exception as e:
+                    self.logger.info(f"[YOUTUBE] DNS {server}/{protocol} failed: {e}")
+
+        for doh_host, ips, path in self.DOH_PROVIDERS:
+            for doh_ip in ips:
+                try:
+                    ip = self._resolve_a_record_with_doh(host, doh_host, doh_ip, path)
+                    if ip:
+                        self.logger.info(f"[YOUTUBE] Resolved {host} via DoH {doh_host}@{doh_ip}: {ip}")
+                        return ip
+                except Exception as e:
+                    self.logger.info(f"[YOUTUBE] DoH {doh_host}@{doh_ip} failed: {e}")
+        return ""
+
+    def _resolve_a_record(self, host: str, server: str, protocol: str):
+        query_id = random.randint(0, 65535)
+        packet = self._build_dns_query(host, query_id)
+        sock_type = socket.SOCK_DGRAM if protocol == "udp" else socket.SOCK_STREAM
+
+        with socket.socket(socket.AF_INET, sock_type) as sock:
+            sock.settimeout(2.0)
+            sock.connect((server, 53))
+            if protocol == "udp":
+                sock.send(packet)
+                data = sock.recv(512)
+            else:
+                sock.sendall(struct.pack("!H", len(packet)) + packet)
+                header = sock.recv(2)
+                if len(header) != 2:
+                    return ""
+                response_len = struct.unpack("!H", header)[0]
+                data = b""
+                while len(data) < response_len:
+                    chunk = sock.recv(response_len - len(data))
+                    if not chunk:
+                        break
+                    data += chunk
+            return self._parse_dns_a_response(data, query_id)
+
+    def _resolve_a_record_with_doh(self, host: str, doh_host: str, doh_ip: str, path_template: str):
+        path = path_template.format(host=quote(host, safe=""))
+        context = self._ssl_context()
+        with socket.create_connection((doh_ip, 443), timeout=4.0) as raw_sock:
+            with context.wrap_socket(raw_sock, server_hostname=doh_host) as tls_sock:
+                tls_sock.settimeout(4.0)
+                request = (
+                    f"GET {path} HTTP/1.1\r\n"
+                    f"Host: {doh_host}\r\n"
+                    "Accept: application/dns-json\r\n"
+                    f"User-Agent: {self.USER_AGENT}\r\n"
+                    "Connection: close\r\n\r\n"
+                )
+                tls_sock.sendall(request.encode("ascii"))
+                chunks = []
+                while True:
+                    chunk = tls_sock.recv(8192)
+                    if not chunk:
+                        break
+                    chunks.append(chunk)
+
+        response = b"".join(chunks)
+        header, _, body = response.partition(b"\r\n\r\n")
+        status_line = header.split(b"\r\n", 1)[0].decode("iso-8859-1", "replace")
+        if " 200 " not in status_line:
+            raise RuntimeError(f"DoH HTTP status was not 200: {status_line}")
+
+        payload = json.loads(body.decode("utf-8"))
+        for answer in payload.get("Answer", []):
+            data = str(answer.get("data", "")).strip()
+            if answer.get("type") == 1 and re.match(r"^\d{1,3}(?:\.\d{1,3}){3}$", data):
+                return data
+        return ""
+
+    def _build_dns_query(self, host: str, query_id: int):
+        header = struct.pack("!HHHHHH", query_id, 0x0100, 1, 0, 0, 0)
+        qname = b"".join(
+            bytes([len(part)]) + part.encode("ascii")
+            for part in host.split(".")
+        ) + b"\x00"
+        question = qname + struct.pack("!HH", 1, 1)
+        return header + question
+
+    def _parse_dns_a_response(self, data: bytes, query_id: int):
+        if len(data) < 12:
+            return ""
+
+        response_id, _flags, qdcount, ancount, _nscount, _arcount = struct.unpack(
+            "!HHHHHH", data[:12]
+        )
+        if response_id != query_id:
+            return ""
+
+        offset = 12
+        for _ in range(qdcount):
+            offset = self._skip_dns_name(data, offset)
+            offset += 4
+
+        for _ in range(ancount):
+            offset = self._skip_dns_name(data, offset)
+            if offset + 10 > len(data):
+                return ""
+            rtype, rclass, _ttl, rdlength = struct.unpack("!HHIH", data[offset:offset + 10])
+            offset += 10
+            rdata = data[offset:offset + rdlength]
+            offset += rdlength
+            if rtype == 1 and rclass == 1 and rdlength == 4:
+                return socket.inet_ntoa(rdata)
+        return ""
+
+    def _skip_dns_name(self, data: bytes, offset: int):
+        while offset < len(data):
+            length = data[offset]
+            if length == 0:
+                return offset + 1
+            if length & 0xC0 == 0xC0:
+                return offset + 2
+            offset += 1 + length
+        return offset
+
+    def _ssl_context(self):
+        try:
+            import certifi
+            return ssl.create_default_context(cafile=certifi.where())
+        except Exception:
+            return ssl.create_default_context()
 
     def _find_chrome(self):
         candidates = [
