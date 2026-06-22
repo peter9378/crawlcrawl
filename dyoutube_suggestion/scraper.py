@@ -6,17 +6,16 @@ import re
 import shutil
 import subprocess
 import sys
-import tempfile
 import time
 
 from DrissionPage import ChromiumOptions, ChromiumPage
 
 
 class Scraper:
-    USER_AGENT = (
+    USER_AGENT_FALLBACK = (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/125.0.0.0 Safari/537.36"
+        "Chrome/149.0.0.0 Safari/537.36"
     )
     SEARCH_INPUT_SELECTORS = (
         "input[name='search_query']",
@@ -30,7 +29,7 @@ class Scraper:
 
     def __init__(self):
         self.logger = logging.getLogger("uvicorn")
-        self.crawl_timeout_seconds = int(os.getenv("DRISSION_CRAWL_TIMEOUT_SECONDS", "55"))
+        self.crawl_timeout_seconds = int(os.getenv("DRISSION_CRAWL_TIMEOUT_SECONDS", "100"))
         self.page_timeout_seconds = float(os.getenv("DRISSION_PAGE_TIMEOUT_SECONDS", "30"))
         self.input_timeout_seconds = float(os.getenv("DRISSION_INPUT_TIMEOUT_SECONDS", "15"))
         self.dropdown_timeout_seconds = float(os.getenv("DRISSION_DROPDOWN_TIMEOUT_SECONDS", "6"))
@@ -121,7 +120,11 @@ class Scraper:
     def _get_suggestions_direct(self, query: str):
         page = None
         xvfb_proc = None
-        profile_dir = tempfile.mkdtemp(prefix="dyoutube_suggestion_profile_")
+        profile_dir = os.getenv(
+            "DRISSION_PROFILE_DIR",
+            "/tmp/dyoutube_suggestion_chrome_profile",
+        )
+        os.makedirs(profile_dir, exist_ok=True)
         try:
             xvfb_proc = self._start_xvfb_if_needed()
             page = self._open_page(profile_dir)
@@ -152,7 +155,6 @@ class Scraper:
                         xvfb_proc.kill()
                     except Exception:
                         pass
-            shutil.rmtree(profile_dir, ignore_errors=True)
 
     def _crawl_suggestions(self, page: ChromiumPage, query: str):
         self.logger.info(f"[YOUTUBE] Starting DrissionPage crawl for: {query}")
@@ -200,6 +202,7 @@ class Scraper:
     def _open_page(self, profile_dir: str):
         co = ChromiumOptions()
         co.headless(False)
+        co.new_env(True)
         chrome_path = self._find_chrome()
         if chrome_path:
             co.set_browser_path(chrome_path)
@@ -213,32 +216,79 @@ class Scraper:
         for arg in (
             "--no-sandbox",
             "--disable-dev-shm-usage",
-            "--disable-gpu",
+            "--disable-quic",
             "--mute-audio",
-            "--disable-notifications",
-            "--disable-popup-blocking",
-            "--disable-infobars",
             "--disable-blink-features=AutomationControlled",
-            "--disable-features=Translate,MediaRouter",
             "--no-first-run",
             "--no-default-browser-check",
-            "--password-store=basic",
             "--lang=ko-KR",
             "--accept-lang=ko-KR,ko,en-US,en",
-            f"--user-agent={self.USER_AGENT}",
             f"--window-size={width},{height}",
         ):
             co.set_argument(arg)
+        co.set_user_agent(self._build_user_agent(chrome_path))
+        co.set_pref("intl.accept_languages", "ko-KR,ko,en-US,en")
+        co.set_pref("profile.default_content_setting_values.notifications", 2)
 
         co.set_load_mode(self.load_mode)
         page = ChromiumPage(co)
         page.set.timeouts(base=self.page_timeout_seconds, page_load=self.page_timeout_seconds)
+        self._install_stealth_scripts(page)
         self.logger.info(
             "[YOUTUBE] DrissionPage Chromium started: "
             f"chrome={chrome_path or 'default'}, profile={profile_dir}, "
             f"display={os.getenv('DISPLAY', '')}, headless=False, load_mode={self.load_mode}"
         )
         return page
+
+    def _build_user_agent(self, chrome_path: str):
+        env_ua = os.getenv("YOUTUBE_USER_AGENT", "").strip()
+        if env_ua:
+            return env_ua
+        if chrome_path:
+            try:
+                completed = subprocess.run(
+                    [chrome_path, "--version"],
+                    capture_output=True,
+                    text=True,
+                    timeout=3,
+                )
+                version_text = (completed.stdout or completed.stderr or "").strip()
+                match = re.search(r"(\d+)\.\d+\.\d+\.\d+", version_text)
+                if match:
+                    major = match.group(1)
+                    return (
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) "
+                        f"Chrome/{major}.0.0.0 Safari/537.36"
+                    )
+            except Exception as e:
+                self.logger.debug(f"[YOUTUBE] Chrome version lookup failed: {e}")
+        return self.USER_AGENT_FALLBACK
+
+    def _install_stealth_scripts(self, page: ChromiumPage):
+        script = """
+        Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+        Object.defineProperty(navigator, 'languages', {get: () => ['ko-KR', 'ko', 'en-US', 'en']});
+        Object.defineProperty(navigator, 'platform', {get: () => 'Win32'});
+        Object.defineProperty(navigator, 'hardwareConcurrency', {get: () => 8});
+        Object.defineProperty(navigator, 'deviceMemory', {get: () => 8});
+        window.chrome = window.chrome || {runtime: {}};
+        const originalQuery = window.navigator.permissions && window.navigator.permissions.query;
+        if (originalQuery) {
+            window.navigator.permissions.query = (parameters) => (
+                parameters && parameters.name === 'notifications'
+                    ? Promise.resolve({state: Notification.permission})
+                    : originalQuery(parameters)
+            );
+        }
+        """
+        try:
+            page.add_init_js(script)
+            page.run_cdp("Page.addScriptToEvaluateOnNewDocument", source=script)
+            self.logger.info("[YOUTUBE] DrissionPage stealth scripts installed")
+        except Exception as e:
+            self.logger.warning(f"[YOUTUBE] Failed to install stealth scripts: {e}")
 
     def _load_youtube_page(self, page: ChromiumPage, url: str):
         last_result = None
@@ -260,6 +310,12 @@ class Scraper:
             if self._wait_for_youtube_dom(page, 5.0):
                 return last_result
 
+            self._retry_same_url_navigation(page, url, attempt)
+            if self._is_chrome_error_page(page):
+                return last_result
+            if self._wait_for_youtube_dom(page, 5.0):
+                return last_result
+
             self._log_page_state(page, f"page_attempt_{attempt}_dom_empty")
             if attempt < 2:
                 self._stop_loading(page)
@@ -268,6 +324,25 @@ class Scraper:
         if last_error:
             raise RuntimeError(f"YouTube page navigation failed: {last_error}") from last_error
         return last_result
+
+    def _retry_same_url_navigation(self, page: ChromiumPage, url: str, attempt: int):
+        url_json = json.dumps(url)
+        try:
+            page.run_js(f"window.location.assign({url_json});")
+            self.logger.info(f"[YOUTUBE] Same-URL JS navigation fallback executed after attempt {attempt}")
+            self._short_wait(2.0, 3.0)
+        except Exception as e:
+            self.logger.debug(f"[YOUTUBE] Same-URL JS navigation fallback failed: {e}")
+
+        if self._has_youtube_dom(page) or self._is_chrome_error_page(page):
+            return
+
+        try:
+            page.refresh()
+            self.logger.info(f"[YOUTUBE] Same-URL refresh fallback executed after attempt {attempt}")
+            self._short_wait(2.0, 3.0)
+        except Exception as e:
+            self.logger.debug(f"[YOUTUBE] Same-URL refresh fallback failed: {e}")
 
     def _set_locale_cookies_via_cdp(self, page: ChromiumPage):
         expires = int(time.time()) + 31536000
