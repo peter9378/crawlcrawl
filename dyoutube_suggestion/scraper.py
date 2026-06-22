@@ -26,6 +26,7 @@ class Scraper:
         "yt-searchbox input",
         "form[role='search'] input",
     )
+    YOUTUBE_HOME_URL = "https://youtube.com"
 
     def __init__(self):
         self.logger = logging.getLogger("uvicorn")
@@ -156,8 +157,9 @@ class Scraper:
     def _crawl_suggestions(self, page: ChromiumPage, query: str):
         self.logger.info(f"[YOUTUBE] Starting DrissionPage crawl for: {query}")
 
-        home_url = "https://www.youtube.com/?hl=ko&gl=KR"
+        home_url = self.YOUTUBE_HOME_URL
         self.logger.info(f"[YOUTUBE] Opening YouTube home: {home_url}")
+        self._set_locale_cookies_via_cdp(page)
         nav_result = self._load_youtube_home(page, home_url)
         self.logger.info(f"[YOUTUBE] YouTube home navigation result: {nav_result}")
         if self._is_chrome_error_page(page):
@@ -273,6 +275,30 @@ class Scraper:
         if last_error:
             raise RuntimeError(f"YouTube home navigation failed: {last_error}") from last_error
         return last_result
+
+    def _set_locale_cookies_via_cdp(self, page: ChromiumPage):
+        expires = int(time.time()) + 31536000
+        cookies = (
+            {"name": "PREF", "value": "hl=ko&gl=KR"},
+            {"name": "CONSENT", "value": "YES+cb.20210328-17-p0.ko+FX+667"},
+            {"name": "SOCS", "value": "CAI"},
+        )
+        try:
+            page.run_cdp("Network.enable")
+            for cookie in cookies:
+                page.run_cdp(
+                    "Network.setCookie",
+                    name=cookie["name"],
+                    value=cookie["value"],
+                    domain=".youtube.com",
+                    path="/",
+                    secure=True,
+                    expires=expires,
+                    url="https://youtube.com/",
+                )
+            self.logger.info("[YOUTUBE] Locale cookies primed via CDP for youtube.com")
+        except Exception as e:
+            self.logger.warning(f"[YOUTUBE] Failed to prime locale cookies via CDP: {e}")
 
     def _wait_for_youtube_dom(self, page: ChromiumPage, timeout: float):
         deadline = time.time() + timeout
