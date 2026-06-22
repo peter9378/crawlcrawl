@@ -33,7 +33,10 @@ class Scraper:
         self.page_timeout_seconds = float(os.getenv("DRISSION_PAGE_TIMEOUT_SECONDS", "30"))
         self.input_timeout_seconds = float(os.getenv("DRISSION_INPUT_TIMEOUT_SECONDS", "15"))
         self.dropdown_timeout_seconds = float(os.getenv("DRISSION_DROPDOWN_TIMEOUT_SECONDS", "6"))
-        self.load_mode = os.getenv("DRISSION_LOAD_MODE", "none")
+        self.load_mode = os.getenv("DRISSION_LOAD_MODE", "eager").lower()
+        if self.load_mode == "none":
+            self.logger.warning("[YOUTUBE] DRISSION_LOAD_MODE=none is not usable for YouTube DOM crawling; using eager")
+            self.load_mode = "eager"
         self.use_subprocess = (
             os.getenv("DRISSION_CRAWL_SUBPROCESS", "1") != "0"
             and os.getenv("YOUTUBE_DRISSION_CHILD") != "1"
@@ -155,17 +158,16 @@ class Scraper:
 
         home_url = "https://www.youtube.com/?hl=ko&gl=KR"
         self.logger.info(f"[YOUTUBE] Opening YouTube home: {home_url}")
-        try:
-            nav_result = page.get(home_url, timeout=self.page_timeout_seconds, retry=0)
-            self.logger.info(f"[YOUTUBE] YouTube home navigation result: {nav_result}")
-        except Exception as e:
-            self._stop_loading(page)
-            self._log_page_state(page, "home_navigation_failed")
-            raise RuntimeError(f"YouTube home navigation failed: {e}") from e
+        nav_result = self._load_youtube_home(page, home_url)
+        self.logger.info(f"[YOUTUBE] YouTube home navigation result: {nav_result}")
         if self._is_chrome_error_page(page):
             self._log_page_state(page, "home_chrome_error")
             raise RuntimeError("YouTube home opened as a Chrome error page")
-        self.logger.info(f"[YOUTUBE] YouTube home navigation returned: url={self._page_url(page)}")
+        if not self._wait_for_youtube_dom(page, self.input_timeout_seconds):
+            self._log_page_state(page, "home_dom_not_ready")
+            self._dump_debug_artifacts(page, query, "home_dom_not_ready")
+            raise RuntimeError(f"YouTube home DOM not ready: url={self._page_url(page)}")
+        self.logger.info(f"[YOUTUBE] YouTube home DOM ready: url={self._page_url(page)}")
         self._set_locale_cookies(page)
         self._short_wait(1.0, 1.8)
         self._accept_consent_if_present(page)
@@ -242,6 +244,57 @@ class Scraper:
             f"display={os.getenv('DISPLAY', '')}, headless=False, load_mode={self.load_mode}"
         )
         return page
+
+    def _load_youtube_home(self, page: ChromiumPage, home_url: str):
+        last_result = None
+        last_error = None
+        for attempt in range(1, 3):
+            try:
+                last_result = page.get(home_url, timeout=self.page_timeout_seconds, retry=0)
+                self.logger.info(
+                    f"[YOUTUBE] Home navigation attempt {attempt}/2 returned: {last_result}, "
+                    f"url={self._page_url(page)}"
+                )
+            except Exception as e:
+                last_error = e
+                self.logger.warning(f"[YOUTUBE] Home navigation attempt {attempt}/2 failed: {e}")
+                self._stop_loading(page)
+
+            if self._is_chrome_error_page(page):
+                return last_result
+            if self._wait_for_youtube_dom(page, 5.0):
+                return last_result
+
+            self._log_page_state(page, f"home_attempt_{attempt}_dom_empty")
+            if attempt < 2:
+                self._stop_loading(page)
+                self._short_wait(0.8, 1.2)
+
+        if last_error:
+            raise RuntimeError(f"YouTube home navigation failed: {last_error}") from last_error
+        return last_result
+
+    def _wait_for_youtube_dom(self, page: ChromiumPage, timeout: float):
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if self._has_youtube_dom(page):
+                return True
+            self._short_wait(0.25, 0.45)
+        return self._has_youtube_dom(page)
+
+    def _has_youtube_dom(self, page: ChromiumPage):
+        try:
+            return bool(page.run_js(
+                """
+                return !!(
+                    document.querySelector("input[name='search_query'], input#search, input.ytSearchboxComponentInput") ||
+                    document.querySelector('ytd-app') ||
+                    document.querySelector('yt-searchbox, ytd-searchbox')
+                );
+                """
+            ))
+        except Exception:
+            return False
 
     def _find_chrome(self):
         candidates = [
@@ -494,30 +547,58 @@ class Scraper:
     def _extract_dropdown_suggestions(self, page: ChromiumPage):
         script = """
         const result = [];
-        const pushText = (el) => {
-            const rect = el.getBoundingClientRect();
-            const style = window.getComputedStyle(el);
-            if (rect.width <= 0 || rect.height <= 0 || style.visibility === 'hidden' || style.display === 'none') {
+        const push = (text) => {
+            text = (text || '').replace(/\\s+/g, ' ').trim();
+            if (text) result.push(text);
+        };
+        const pushOption = (el) => {
+            push(el.getAttribute('aria-label'));
+            if (el.getAttribute('aria-label')) return;
+
+            const left = el.querySelector('.ytSuggestionComponentLeftContainer');
+            if (left) {
+                push(left.innerText || left.textContent);
                 return;
             }
-            const text = (el.innerText || el.textContent || '').replace(/\\s+/g, ' ').trim();
-            if (text) result.push(text);
+            push(el.innerText || el.textContent);
         };
 
         const input = document.querySelector("input[name='search_query'], input#search, input.ytSearchboxComponentInput");
         const controls = input && input.getAttribute('aria-controls');
         const controlled = controls && document.getElementById(controls);
+        const containers = [];
+        const addContainer = (node) => {
+            if (node && !containers.includes(node)) containers.push(node);
+        };
+        addContainer(controlled);
+        document.querySelectorAll(
+            ".ytSearchboxComponentSuggestionsContainer, " +
+            "div[role='listbox'][id^='i'], " +
+            "div[role='listbox']"
+        ).forEach(addContainer);
+
+        containers.forEach((container) => {
+            container.querySelectorAll(
+                ".ytSuggestionComponentText[role='option'], " +
+                ".ytSuggestionComponentText[aria-label], " +
+                "[role='option'][aria-label], " +
+                "[role='option']"
+            ).forEach(pushOption);
+        });
+
         if (controlled) {
-            controlled.querySelectorAll("[role='option'], li, div.ytSuggestionComponentSuggestion").forEach(pushText);
+            controlled.querySelectorAll(".ytSuggestionComponentLeftContainer").forEach((el) => {
+                push(el.innerText || el.textContent);
+            });
         }
 
         document.querySelectorAll(
-            "div.ytSuggestionComponentSuggestion div.ytSuggestionComponentText, " +
-            "div.ytSuggestionComponentSuggestion, " +
+            "div.ytSuggestionComponentSuggestion div.ytSuggestionComponentText[aria-label], " +
+            "div.ytSuggestionComponentSuggestion [role='option'][aria-label], " +
             "[role='option'], " +
             "li.sbsb_c .sbqs_c, " +
             "li.sbsb_c"
-        ).forEach(pushText);
+        ).forEach(pushOption);
 
         return result;
         """
@@ -621,6 +702,10 @@ class Scraper:
         const searchInput = document.querySelector("input[name='search_query'], input#search, input.ytSearchboxComponentInput");
         const controls = searchInput && searchInput.getAttribute('aria-controls');
         const controlled = controls && document.getElementById(controls);
+        const suggestionLabels = Array.from(document.querySelectorAll(
+            ".ytSearchboxComponentSuggestionsContainer [role='option'][aria-label], " +
+            ".ytSuggestionComponentText[aria-label]"
+        )).slice(0, 20).map((el) => el.getAttribute('aria-label') || '');
         return {
             readyState: document.readyState,
             ytdApp: !!document.querySelector('ytd-app'),
@@ -635,6 +720,7 @@ class Scraper:
             searchControls: controls || '',
             controlledHidden: controlled ? controlled.hidden : null,
             controlledText: controlled ? (controlled.innerText || controlled.textContent || '').replace(/\\s+/g, ' ').trim().slice(0, 240) : '',
+            suggestionLabels,
             inputs,
             bodyPreview: body.slice(0, 240)
         };
