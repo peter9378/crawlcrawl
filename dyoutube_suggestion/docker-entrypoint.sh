@@ -28,7 +28,7 @@ if [ "${FIX_RESOLV_CONF:-1}" = "1" ] && ! can_resolve_youtube; then
             log "DNS recovery succeeded for www.youtube.com"
             unset YOUTUBE_SYSTEM_DNS_FAILED
         else
-            log "DNS recovery did not resolve www.youtube.com; Playwright will try fresh DNS host resolver rules"
+            log "DNS recovery did not resolve www.youtube.com; DrissionPage Chrome will use DNS-over-HTTPS fallback"
         fi
     else
         log "could not rewrite /etc/resolv.conf; service will continue with existing resolver"

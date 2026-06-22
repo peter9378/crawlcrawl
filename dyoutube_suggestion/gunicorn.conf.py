@@ -17,7 +17,7 @@ worker_class = "uvicorn.workers.UvicornWorker"
 worker_connections = 1000
 max_requests = 1000  # 워커당 최대 요청 수 (메모리 누수 방지)
 max_requests_jitter = 100  # 랜덤 지터 (모든 워커가 동시에 재시작되지 않도록)
-timeout = 120  # Selenium 사용으로 긴 타임아웃 설정
+timeout = 120  # Browser crawling needs a longer timeout.
 graceful_timeout = 30  # Graceful shutdown 대기 시간
 keepalive = 5
 

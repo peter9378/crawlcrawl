@@ -1,4 +1,4 @@
-# GCP Rocky Linux - Playwright + system Google Chrome
+# GCP Rocky Linux - DrissionPage + system Google Chrome
 FROM rockylinux:9
 
 ARG TARGETARCH
@@ -42,7 +42,7 @@ RUN echo "ip_resolve=4" >> /etc/dnf/dnf.conf && \
         xdg-utils \
     && dnf clean all
 
-# System Chrome for Playwright. Use IPv4 during build to avoid resolver flakiness.
+# System Chrome for DrissionPage. Use IPv4 during build to avoid resolver flakiness.
 RUN if [ "$TARGETARCH" != "amd64" ]; then \
         echo "google-chrome-stable RPM supports amd64 only; build with --platform linux/amd64"; \
         exit 1; \
@@ -55,9 +55,13 @@ RUN if [ "$TARGETARCH" != "amd64" ]; then \
     test -x /usr/bin/google-chrome && \
     google-chrome --version
 
-ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
-ENV PLAYWRIGHT_CHROME_EXECUTABLE=/usr/bin/google-chrome
+ENV DRISSION_CHROME_PATH=/usr/bin/google-chrome
 ENV DISPLAY=:99
+ENV DRISSION_CRAWL_TIMEOUT_SECONDS=70
+ENV DRISSION_PAGE_TIMEOUT_SECONDS=35
+ENV DRISSION_INPUT_TIMEOUT_SECONDS=15
+ENV DRISSION_DROPDOWN_TIMEOUT_SECONDS=8
+ENV YOUTUBE_DEBUG_DUMP=1
 ENV LANG=ko_KR.UTF-8
 ENV LC_ALL=ko_KR.UTF-8
 

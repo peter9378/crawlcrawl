@@ -1,56 +1,42 @@
-import logging
 import json
+import logging
 import os
 import random
 import re
-import socket
-import struct
+import shutil
 import subprocess
 import sys
+import tempfile
 import time
-from contextlib import contextmanager
-from datetime import datetime, timezone, timedelta
 from urllib.parse import quote
 
-from bs4 import BeautifulSoup
-from dateutil.relativedelta import relativedelta
-from playwright.sync_api import (
-    Error as PlaywrightError,
-    TimeoutError as PlaywrightTimeoutError,
-    sync_playwright,
-)
+from DrissionPage import ChromiumOptions, ChromiumPage
 
 
 class Scraper:
-    YOUTUBE_HOSTS = ("www.youtube.com", "youtube.com", "m.youtube.com")
-    PUBLIC_DNS_SERVERS = ("8.8.8.8", "1.1.1.1", "9.9.9.9")
     USER_AGENT = (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
         "Chrome/125.0.0.0 Safari/537.36"
     )
     SEARCH_INPUT_SELECTORS = (
-        "input[name='search_query'], "
-        "input#search, "
-        "input.ytSearchboxComponentInput, "
-        "ytd-searchbox input, "
-        "yt-searchbox input, "
-        "form[role='search'] input"
+        "input[name='search_query']",
+        "input#search",
+        "input.ytSearchboxComponentInput",
+        "ytd-searchbox input",
+        "yt-searchbox input",
+        "form[role='search'] input",
     )
 
     def __init__(self):
         self.logger = logging.getLogger("uvicorn")
-        self.chrome_executable = os.getenv("PLAYWRIGHT_CHROME_EXECUTABLE", "/usr/bin/google-chrome")
-        self.headless = os.getenv("PLAYWRIGHT_HEADLESS", "1") != "0"
-        self.launch_timeout_ms = int(os.getenv("PLAYWRIGHT_LAUNCH_TIMEOUT_MS", "20000"))
-        self.navigation_timeout_ms = int(os.getenv("PLAYWRIGHT_NAVIGATION_TIMEOUT_MS", "15000"))
-        self.input_timeout_ms = int(os.getenv("PLAYWRIGHT_INPUT_TIMEOUT_MS", "10000"))
-        self.suggestion_timeout_ms = int(os.getenv("PLAYWRIGHT_SUGGESTION_TIMEOUT_MS", "3500"))
-        self.navigation_retries = int(os.getenv("PLAYWRIGHT_NAVIGATION_RETRIES", "1"))
-        self.crawl_timeout_seconds = int(os.getenv("PLAYWRIGHT_CRAWL_TIMEOUT_SECONDS", "30"))
+        self.crawl_timeout_seconds = int(os.getenv("DRISSION_CRAWL_TIMEOUT_SECONDS", "55"))
+        self.page_timeout_seconds = float(os.getenv("DRISSION_PAGE_TIMEOUT_SECONDS", "30"))
+        self.input_timeout_seconds = float(os.getenv("DRISSION_INPUT_TIMEOUT_SECONDS", "15"))
+        self.dropdown_timeout_seconds = float(os.getenv("DRISSION_DROPDOWN_TIMEOUT_SECONDS", "6"))
         self.use_subprocess = (
-            os.getenv("PLAYWRIGHT_CRAWL_SUBPROCESS", "1") != "0" and
-            os.getenv("YOUTUBE_PLAYWRIGHT_CHILD") != "1"
+            os.getenv("DRISSION_CRAWL_SUBPROCESS", "1") != "0"
+            and os.getenv("YOUTUBE_DRISSION_CHILD") != "1"
         )
 
     def get_suggestions(self, query: str):
@@ -63,28 +49,13 @@ class Scraper:
 
         return self._get_suggestions_direct(query)
 
-    def _get_suggestions_direct(self, query: str):
-        url = f"https://www.youtube.com/results?search_query={quote(query)}&hl=ko&gl=KR"
-        try:
-            suggestions = self._crawl_suggestions(query, url)
-            result = self._build_suggestion_response(query, suggestions)
-            self.logger.info(f"[YOUTUBE] Final suggestion result: {result}")
-            return result
-        except Exception as e:
-            self.logger.warning(f"[YOUTUBE] Playwright suggestion crawl failed for {url}: {e}")
-            return self._build_suggestion_response(
-                query,
-                [],
-                error="youtube_unreachable",
-                detail=str(e),
-            )
-
     def _get_suggestions_via_subprocess(self, query: str):
         env = os.environ.copy()
-        env["YOUTUBE_PLAYWRIGHT_CHILD"] = "1"
+        env["YOUTUBE_DRISSION_CHILD"] = "1"
         env["PYTHONUNBUFFERED"] = "1"
         child_code = (
-            "import json, sys; "
+            "import json, logging, sys; "
+            "logging.basicConfig(level=logging.INFO, format='%(levelname)s:%(name)s:%(message)s'); "
             "from scraper import Scraper; "
             "print(json.dumps(Scraper().get_suggestions(sys.argv[1]), ensure_ascii=False))"
         )
@@ -99,10 +70,10 @@ class Scraper:
                 timeout=self.crawl_timeout_seconds,
             )
         except subprocess.TimeoutExpired as e:
-            detail = f"Playwright subprocess timed out after {self.crawl_timeout_seconds}s"
-            stderr = (e.stderr or "").strip()
+            detail = f"DrissionPage subprocess timed out after {self.crawl_timeout_seconds}s"
+            stderr = self._stringify_output(e.stderr)
             if stderr:
-                detail = f"{detail}: {stderr[-300:]}"
+                detail = f"{detail}: {stderr[-500:]}"
             self.logger.warning(f"[YOUTUBE] {detail}")
             return self._build_suggestion_response(
                 query,
@@ -111,15 +82,15 @@ class Scraper:
                 detail=detail,
             )
 
-        stdout = (completed.stdout or "").strip()
-        stderr = (completed.stderr or "").strip()
-        if stderr:
-            for line in stderr.splitlines()[-10:]:
+        stdout = completed.stdout or ""
+        stderr = completed.stderr or ""
+        if stderr.strip():
+            for line in stderr.strip().splitlines()[-15:]:
                 self.logger.info(f"[YOUTUBE_CHILD] {line}")
 
         if completed.returncode != 0:
-            detail = stderr[-500:] or stdout[-500:] or f"child exit code {completed.returncode}"
-            self.logger.warning(f"[YOUTUBE] Playwright subprocess failed: {detail}")
+            detail = (stderr or stdout or f"child exit code {completed.returncode}")[-500:]
+            self.logger.warning(f"[YOUTUBE] DrissionPage subprocess failed: {detail}")
             return self._build_suggestion_response(
                 query,
                 [],
@@ -129,12 +100,12 @@ class Scraper:
 
         try:
             json_line = next(
-                line for line in reversed(stdout.splitlines())
+                line for line in reversed(stdout.strip().splitlines())
                 if line.strip().startswith("{")
             )
             return json.loads(json_line)
         except (StopIteration, json.JSONDecodeError) as e:
-            detail = f"Invalid Playwright subprocess output: {e}; stdout={stdout[-300:]}"
+            detail = f"Invalid DrissionPage subprocess output: {e}; stdout={stdout[-300:]}"
             self.logger.warning(f"[YOUTUBE] {detail}")
             return self._build_suggestion_response(
                 query,
@@ -143,488 +114,376 @@ class Scraper:
                 detail=detail,
             )
 
-    def _crawl_suggestions(self, query: str, url: str):
-        self.logger.info(f"[YOUTUBE] Getting suggestions with Playwright for: {query}")
-        with self._new_page() as page:
-            self._goto_results_page(page, url)
-            self._log_page_state(page, "results_loaded")
-
-            search_input = self._find_visible_search_input(page, self.input_timeout_ms)
-            if not search_input:
-                self._log_page_state(page, "search_input_not_found", warning=True)
-                return []
-
-            html = search_input.evaluate("(el) => el.outerHTML")
-            self.logger.info(f"[YOUTUBE] Found search input: {html[:220]}")
-
-            self._open_suggestion_dropdown(page, search_input)
-            list_a = self._wait_for_suggestions(page)
-            self.logger.info(f"[YOUTUBE] List A (Focus): {list_a}")
-
-            self._refresh_suggestions_with_keyboard(page, search_input)
-            list_b = self._wait_for_suggestions(page)
-            self.logger.info(f"[YOUTUBE] List B (Space): {list_b}")
-
-            suggestions = self._expand_ellipsis_suggestions(
-                self._dedupe_suggestions(list_b + list_a),
-                query,
-            )
-            if not suggestions:
-                self._log_page_state(page, "suggestions_empty", warning=True)
-            return suggestions
-
-    @contextmanager
-    def _new_page(self):
-        playwright = sync_playwright().start()
-        browser = None
-        context = None
+    def _get_suggestions_direct(self, query: str):
+        page = None
+        xvfb_proc = None
+        profile_dir = tempfile.mkdtemp(prefix="dyoutube_suggestion_profile_")
         try:
-            browser = playwright.chromium.launch(
-                headless=self.headless,
-                executable_path=self._chrome_executable_path(),
-                timeout=self.launch_timeout_ms,
-                args=self._browser_args(),
+            xvfb_proc = self._start_xvfb_if_needed()
+            page = self._open_page(profile_dir)
+            suggestions = self._crawl_suggestions(page, query)
+            result = self._build_suggestion_response(query, suggestions)
+            self.logger.info(f"[YOUTUBE] Final suggestion result: {result}")
+            return result
+        except Exception as e:
+            self.logger.warning(f"[YOUTUBE] DrissionPage suggestion crawl failed: {e}")
+            return self._build_suggestion_response(
+                query,
+                [],
+                error="youtube_unreachable",
+                detail=str(e),
             )
-            context = browser.new_context(
-                locale="ko-KR",
-                timezone_id="Asia/Seoul",
-                viewport={"width": 1920, "height": 1080},
-                user_agent=self.USER_AGENT,
-                extra_http_headers={
-                    "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7"
-                },
-            )
-            context.set_default_timeout(self.input_timeout_ms)
-            context.set_default_navigation_timeout(self.navigation_timeout_ms)
-            self._set_locale_cookies(context)
-
-            page = context.new_page()
-            page.route("**/*", self._route_request)
-            yield page
         finally:
-            if context:
+            if page is not None:
                 try:
-                    context.close()
-                except PlaywrightError as e:
-                    self.logger.debug(f"[YOUTUBE] Error closing context: {e}")
-            if browser:
+                    page.quit()
+                except Exception as e:
+                    self.logger.debug(f"[YOUTUBE] Error closing DrissionPage: {e}")
+            if xvfb_proc is not None:
                 try:
-                    browser.close()
-                except PlaywrightError as e:
-                    self.logger.debug(f"[YOUTUBE] Error closing browser: {e}")
-            playwright.stop()
+                    xvfb_proc.terminate()
+                    xvfb_proc.wait(timeout=3)
+                except Exception:
+                    try:
+                        xvfb_proc.kill()
+                    except Exception:
+                        pass
+            shutil.rmtree(profile_dir, ignore_errors=True)
 
-    def _chrome_executable_path(self):
-        if self.chrome_executable and os.path.exists(self.chrome_executable):
-            return self.chrome_executable
-        if self.chrome_executable != "/usr/bin/google-chrome":
-            self.logger.warning(
-                f"[YOUTUBE] PLAYWRIGHT_CHROME_EXECUTABLE not found: {self.chrome_executable}"
-            )
-        return None
+    def _crawl_suggestions(self, page: ChromiumPage, query: str):
+        self.logger.info(f"[YOUTUBE] Starting DrissionPage crawl for: {query}")
 
-    def _browser_args(self):
-        args = [
+        home_url = "https://www.youtube.com/?hl=ko&gl=KR"
+        self.logger.info(f"[YOUTUBE] Opening YouTube home: {home_url}")
+        page.get(home_url, timeout=self.page_timeout_seconds)
+        self._set_locale_cookies(page)
+        self._short_wait(1.0, 1.8)
+        self._accept_consent_if_present(page)
+        self._log_page_state(page, "home_loaded")
+
+        search_input = self._find_search_input(page, self.input_timeout_seconds)
+        if not search_input:
+            self._dump_debug_artifacts(page, query, "home_search_input_not_found")
+            raise RuntimeError("YouTube home search input not found")
+
+        self._submit_search(page, search_input, query)
+        if not self._wait_for_results_page(page, query):
+            self._dump_debug_artifacts(page, query, "results_page_not_loaded")
+            raise RuntimeError(f"YouTube search results page did not load: {self._page_url(page)}")
+        self._log_page_state(page, "results_loaded")
+
+        results_input = self._find_search_input(page, self.input_timeout_seconds)
+        if not results_input:
+            self._dump_debug_artifacts(page, query, "results_search_input_not_found")
+            raise RuntimeError("YouTube results search input not found")
+
+        self._click_results_search_box(page, results_input)
+        suggestions = self._wait_for_dropdown_suggestions(page)
+        if not suggestions:
+            self._dump_debug_artifacts(page, query, "suggestions_not_found")
+            self.logger.warning("[YOUTUBE] Dropdown suggestions were not found after clicking results search box")
+        return self._expand_ellipsis_suggestions(suggestions, query)
+
+    def _open_page(self, profile_dir: str):
+        co = ChromiumOptions()
+        co.headless(False)
+        chrome_path = self._find_chrome()
+        if chrome_path:
+            co.set_browser_path(chrome_path)
+        else:
+            self.logger.warning("[YOUTUBE] Chrome executable not found explicitly; DrissionPage will use default discovery")
+        co.set_user_data_path(profile_dir)
+        co.auto_port(True)
+
+        width = random.randint(1700, 1920)
+        height = random.randint(900, 1080)
+        for arg in (
             "--no-sandbox",
             "--disable-dev-shm-usage",
             "--disable-gpu",
-            "--disable-extensions",
+            "--mute-audio",
             "--disable-notifications",
             "--disable-popup-blocking",
-            "--disable-translate",
-            "--disable-sync",
-            "--disable-domain-reliability",
-            "--disable-renderer-backgrounding",
-            "--disable-device-discovery-notifications",
-            "--disable-quic",
-            "--dns-prefetch-disable",
-            "--mute-audio",
-            "--blink-settings=imagesEnabled=false",
-            "--window-size=1920,1080",
-        ]
-        resolver_rules = self._host_resolver_rules()
-        if resolver_rules:
-            args.append(f"--host-resolver-rules={resolver_rules}")
-            self.logger.info(f"[YOUTUBE] Applying Chrome host resolver rules: {resolver_rules}")
-        return args
-
-    def _host_resolver_rules(self):
-        if os.getenv("YOUTUBE_DISABLE_HOST_RESOLVER_RULES") == "1":
-            return ""
-
-        explicit_rules = os.getenv("YOUTUBE_HOST_RESOLVER_RULES")
-        if explicit_rules:
-            return explicit_rules
-
-        ip = os.getenv("YOUTUBE_HOST_IP", "").strip()
-        if not ip and (
-            os.getenv("YOUTUBE_SYSTEM_DNS_FAILED") == "1" or
-            os.getenv("YOUTUBE_AUTO_HOST_RESOLVE") == "1"
+            "--disable-infobars",
+            "--disable-blink-features=AutomationControlled",
+            "--disable-features=Translate,MediaRouter",
+            "--no-first-run",
+            "--no-default-browser-check",
+            "--password-store=basic",
+            "--lang=ko-KR",
+            "--accept-lang=ko-KR,ko,en-US,en",
+            f"--user-agent={self.USER_AGENT}",
+            f"--window-size={width},{height}",
         ):
-            ip = self._resolve_youtube_ip_with_public_dns()
-            if ip:
-                self.logger.warning(
-                    f"[YOUTUBE] System DNS failed; applying fresh YouTube IP for Chrome resolver: {ip}"
-                )
-        if not ip:
-            return ""
+            co.set_argument(arg)
 
-        rules = [f"MAP {host} {ip}" for host in self.YOUTUBE_HOSTS]
-        rules.append("EXCLUDE localhost")
-        rules.append("EXCLUDE 127.0.0.1")
-        return ",".join(rules)
+        if os.getenv("YOUTUBE_SYSTEM_DNS_FAILED") == "1" or os.getenv("YOUTUBE_FORCE_CHROME_DOH") == "1":
+            co.set_argument("--enable-features=DnsOverHttps")
+            co.set_argument("--dns-over-https-mode=secure")
+            co.set_argument("--dns-over-https-templates=https://dns.google/dns-query")
+            co.set_argument(
+                "--host-resolver-rules=MAP dns.google 8.8.8.8,"
+                "MAP cloudflare-dns.com 1.1.1.1,"
+                "EXCLUDE localhost,EXCLUDE 127.0.0.1"
+            )
+            self.logger.info("[YOUTUBE] Chrome DNS-over-HTTPS enabled for DrissionPage")
 
-    def _resolve_youtube_ip_with_public_dns(self):
-        for server in self.PUBLIC_DNS_SERVERS:
-            for protocol in ("udp", "tcp"):
-                try:
-                    ip = self._resolve_a_record("www.youtube.com", server, protocol)
-                    if ip:
-                        self.logger.info(
-                            f"[YOUTUBE] Resolved www.youtube.com via DNS {server}/{protocol}: {ip}"
-                        )
-                        return ip
-                except Exception as e:
-                    self.logger.debug(f"[YOUTUBE] DNS {server}/{protocol} failed: {e}")
-        return ""
-
-    def _resolve_a_record(self, host: str, server: str, protocol: str):
-        query_id = random.randint(0, 65535)
-        packet = self._build_dns_query(host, query_id)
-
-        if protocol == "udp":
-            sock_type = socket.SOCK_DGRAM
-        else:
-            sock_type = socket.SOCK_STREAM
-
-        with socket.socket(socket.AF_INET, sock_type) as sock:
-            sock.settimeout(1.5)
-            sock.connect((server, 53))
-            if protocol == "udp":
-                sock.send(packet)
-                data = sock.recv(512)
-            else:
-                sock.sendall(struct.pack("!H", len(packet)) + packet)
-                header = sock.recv(2)
-                if len(header) != 2:
-                    return ""
-                response_len = struct.unpack("!H", header)[0]
-                data = b""
-                while len(data) < response_len:
-                    chunk = sock.recv(response_len - len(data))
-                    if not chunk:
-                        break
-                    data += chunk
-            return self._parse_dns_a_response(data, query_id)
-
-    def _build_dns_query(self, host: str, query_id: int):
-        header = struct.pack("!HHHHHH", query_id, 0x0100, 1, 0, 0, 0)
-        qname = b"".join(
-            bytes([len(part)]) + part.encode("ascii")
-            for part in host.split(".")
-        ) + b"\x00"
-        question = qname + struct.pack("!HH", 1, 1)
-        return header + question
-
-    def _parse_dns_a_response(self, data: bytes, query_id: int):
-        if len(data) < 12:
-            return ""
-
-        response_id, _flags, qdcount, ancount, _nscount, _arcount = struct.unpack(
-            "!HHHHHH", data[:12]
+        page = ChromiumPage(co)
+        page.set.timeouts(base=self.page_timeout_seconds, page_load=self.page_timeout_seconds)
+        self.logger.info(
+            "[YOUTUBE] DrissionPage Chromium started: "
+            f"chrome={chrome_path or 'default'}, profile={profile_dir}, "
+            f"display={os.getenv('DISPLAY', '')}, headless=False"
         )
-        if response_id != query_id:
-            return ""
+        return page
 
-        offset = 12
-        for _ in range(qdcount):
-            offset = self._skip_dns_name(data, offset)
-            offset += 4
-
-        for _ in range(ancount):
-            offset = self._skip_dns_name(data, offset)
-            if offset + 10 > len(data):
-                return ""
-            rtype, rclass, _ttl, rdlength = struct.unpack("!HHIH", data[offset:offset + 10])
-            offset += 10
-            rdata = data[offset:offset + rdlength]
-            offset += rdlength
-            if rtype == 1 and rclass == 1 and rdlength == 4:
-                return socket.inet_ntoa(rdata)
-        return ""
-
-    def _skip_dns_name(self, data: bytes, offset: int):
-        while offset < len(data):
-            length = data[offset]
-            if length == 0:
-                return offset + 1
-            if length & 0xC0 == 0xC0:
-                return offset + 2
-            offset += 1 + length
-        return offset
-
-    def _set_locale_cookies(self, context):
-        expires = int(time.time()) + 60 * 60 * 24 * 365
-        cookies = [
-            {
-                "name": "PREF",
-                "value": "hl=ko&gl=KR",
-                "domain": ".youtube.com",
-                "path": "/",
-                "expires": expires,
-                "httpOnly": False,
-                "secure": True,
-                "sameSite": "Lax",
-            },
-            {
-                "name": "CONSENT",
-                "value": "YES+cb.20210328-17-p0.ko+FX+667",
-                "domain": ".youtube.com",
-                "path": "/",
-                "expires": expires,
-                "httpOnly": False,
-                "secure": True,
-                "sameSite": "Lax",
-            },
-            {
-                "name": "SOCS",
-                "value": "CAI",
-                "domain": ".youtube.com",
-                "path": "/",
-                "expires": expires,
-                "httpOnly": False,
-                "secure": True,
-                "sameSite": "Lax",
-            },
+    def _find_chrome(self):
+        candidates = [
+            os.getenv("DRISSION_CHROME_PATH", ""),
+            "/usr/bin/google-chrome",
+            "/opt/google/chrome/google-chrome",
+            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+            "google-chrome",
+            "chrome",
         ]
-        context.add_cookies(cookies)
-
-    def _route_request(self, route):
-        if route.request.resource_type in {"image", "media", "font"}:
-            route.abort()
-            return
-        route.continue_()
-
-    def _goto_results_page(self, page, url: str):
-        last_error = None
-        for attempt in range(1, self.navigation_retries + 1):
-            try:
-                self.logger.info(
-                    f"[YOUTUBE] Loading YouTube results page with Playwright: {url} "
-                    f"(attempt {attempt}/{self.navigation_retries})"
-                )
-                page.goto(url, wait_until="commit", timeout=self.navigation_timeout_ms)
-                self._raise_if_browser_error_page(page, url)
-                self._find_visible_search_input(page, self.input_timeout_ms)
-                self.logger.info(f"[YOUTUBE] Search results page ready: {page.url}")
-                return
-            except (PlaywrightTimeoutError, PlaywrightError, RuntimeError) as e:
-                last_error = e
-                page_url = getattr(page, "url", "unavailable")
-                self.logger.warning(
-                    f"[YOUTUBE] Playwright navigation attempt {attempt}/{self.navigation_retries} "
-                    f"failed at {page_url}: {e}"
-                )
-                if attempt < self.navigation_retries:
-                    page.wait_for_timeout(700 * attempt)
-        raise RuntimeError(f"Failed to load youtube.com results page: {last_error}")
-
-    def _raise_if_browser_error_page(self, page, url: str):
-        state = self._page_state(page)
-        text = " ".join(str(state.get(key, "")) for key in ("href", "title", "bodyPreview"))
-        markers = (
-            "chrome-error://",
-            "ERR_NAME_NOT_RESOLVED",
-            "ERR_INTERNET_DISCONNECTED",
-            "ERR_CONNECTION_TIMED_OUT",
-            "ERR_CONNECTION_CLOSED",
-            "ERR_TUNNEL_CONNECTION_FAILED",
-            "DNS_PROBE",
-            "사이트에 연결할 수 없음",
-            "This site can't be reached",
-            "This site can’t be reached",
-            "server IP address could not be found",
-        )
-        if any(marker in text for marker in markers):
-            raise RuntimeError(f"Chrome error page while loading {url}: {state}")
-
-    def _find_visible_search_input(self, page, timeout_ms: int):
-        deadline = time.monotonic() + (timeout_ms / 1000)
-        while time.monotonic() < deadline:
-            try:
-                handle = page.evaluate_handle(
-                    """
-                    (selector) => {
-                        const inputs = Array.from(document.querySelectorAll(selector));
-                        return inputs.find((el) => {
-                            const rect = el.getBoundingClientRect();
-                            const style = window.getComputedStyle(el);
-                            return rect.width > 0 &&
-                                rect.height > 0 &&
-                                style.visibility !== 'hidden' &&
-                                style.display !== 'none';
-                        }) || null;
-                    }
-                    """,
-                    self.SEARCH_INPUT_SELECTORS,
-                )
-                element = handle.as_element()
-                if element:
-                    return element
-                handle.dispose()
-            except PlaywrightError:
-                pass
-            page.wait_for_timeout(300)
+        for candidate in candidates:
+            if not candidate:
+                continue
+            if os.path.isabs(candidate):
+                if os.path.exists(candidate):
+                    return candidate
+            else:
+                resolved = shutil.which(candidate)
+                if resolved:
+                    return resolved
         return None
 
-    def _open_suggestion_dropdown(self, page, search_input):
-        search_input.scroll_into_view_if_needed(timeout=5000)
-        search_input.click(timeout=5000)
-        search_input.evaluate(
-            """
-            (input) => {
-                input.focus();
-                ['pointerdown', 'mousedown', 'mouseup', 'click'].forEach((type) => {
-                    input.dispatchEvent(new MouseEvent(type, {
-                        bubbles: true,
-                        cancelable: true,
-                        view: window
-                    }));
-                });
-                input.dispatchEvent(new InputEvent('input', {
-                    bubbles: true,
-                    inputType: 'insertText',
-                    data: ''
-                }));
-            }
-            """
-        )
-        page.wait_for_timeout(500)
-        active = page.evaluate(
-            """
-            () => {
-                const el = document.activeElement;
-                if (!el) return '';
-                return `${el.tagName.toLowerCase()}.${el.className || ''}`;
-            }
-            """
-        )
-        self.logger.info(f"[YOUTUBE] Active Element: {active}")
+    def _start_xvfb_if_needed(self):
+        if sys.platform != "linux" or os.getenv("DRISSION_START_XVFB", "1") == "0":
+            return None
+        if os.getenv("DRISSION_USE_EXISTING_DISPLAY", "0") == "1" and os.getenv("DISPLAY"):
+            self.logger.info(f"[YOUTUBE] Using existing DISPLAY={os.getenv('DISPLAY')}")
+            return None
+        if not shutil.which("Xvfb"):
+            self.logger.warning("[YOUTUBE] Xvfb not found; Chrome will start without virtual display")
+            return None
 
-    def _refresh_suggestions_with_keyboard(self, page, search_input):
+        fixed_display = os.getenv("DRISSION_XVFB_DISPLAY")
+        last_error = ""
+        for attempt in range(1, 4):
+            display = fixed_display or f":{random.randint(90, 199)}"
+            os.environ["DISPLAY"] = display
+            proc = subprocess.Popen(
+                ["Xvfb", display, "-screen", "0", "1920x1080x24", "-ac", "+extension", "RANDR"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            time.sleep(0.6)
+            if proc.poll() is None:
+                self.logger.info(f"[YOUTUBE] Xvfb started on {display} (attempt {attempt})")
+                return proc
+
+            try:
+                last_error = proc.stderr.read() if proc.stderr else ""
+            except Exception:
+                last_error = ""
+            self.logger.warning(
+                f"[YOUTUBE] Xvfb start failed on {display} "
+                f"(attempt {attempt}/3): {last_error[-300:]}"
+            )
+            if fixed_display:
+                break
+
+        raise RuntimeError(f"Xvfb failed to start: {last_error[-500:]}")
+
+    def _set_locale_cookies(self, page: ChromiumPage):
+        script = """
+        document.cookie = 'PREF=hl=ko&gl=KR; path=/; domain=.youtube.com; max-age=31536000; SameSite=Lax';
+        document.cookie = 'CONSENT=YES+cb.20210328-17-p0.ko+FX+667; path=/; domain=.youtube.com; max-age=31536000; SameSite=Lax';
+        document.cookie = 'SOCS=CAI; path=/; domain=.youtube.com; max-age=31536000; SameSite=Lax';
+        return document.cookie;
+        """
         try:
-            search_input.press(" ")
-            page.wait_for_timeout(150)
-            search_input.press("Backspace")
-            page.wait_for_timeout(300)
-            self.logger.info("[YOUTUBE] Dispatched keyboard refresh for suggestions")
-        except PlaywrightError as e:
-            self.logger.warning(f"[YOUTUBE] Failed to refresh suggestions with keyboard: {e}")
+            cookie_preview = page.run_js(script)
+            self.logger.info(f"[YOUTUBE] Locale cookies set: {str(cookie_preview)[:160]}")
+        except Exception as e:
+            self.logger.warning(f"[YOUTUBE] Failed to set locale cookies: {e}")
 
-    def _wait_for_suggestions(self, page):
-        deadline = time.monotonic() + (self.suggestion_timeout_ms / 1000)
-        last_result = []
-        while time.monotonic() < deadline:
-            last_result = self._scrape_suggestion_texts(page)
-            if last_result:
-                return last_result
-            page.wait_for_timeout(250)
-        return last_result
-
-    def _scrape_suggestion_texts(self, page):
+    def _accept_consent_if_present(self, page: ChromiumPage):
+        script = """
+        const labels = ['모두 동의', '동의', 'Accept all', 'I agree'];
+        const nodes = Array.from(document.querySelectorAll('button, tp-yt-paper-button, ytd-button-renderer'));
+        const target = nodes.find((node) => {
+            const text = (node.innerText || node.textContent || '').trim();
+            return labels.some((label) => text.includes(label));
+        });
+        if (target) {
+            target.click();
+            return (target.innerText || target.textContent || '').trim();
+        }
+        return '';
+        """
         try:
-            texts = page.evaluate(
+            clicked = page.run_js(script)
+            if clicked:
+                self.logger.info(f"[YOUTUBE] Consent accepted: {clicked!r}")
+                self._short_wait(0.8, 1.4)
+        except Exception as e:
+            self.logger.debug(f"[YOUTUBE] Consent check skipped: {e}")
+
+    def _find_search_input(self, page: ChromiumPage, timeout: float):
+        deadline = time.time() + timeout
+        last_error = None
+        while time.time() < deadline:
+            for selector in self.SEARCH_INPUT_SELECTORS:
+                try:
+                    ele = page.ele(f"css:{selector}", timeout=0.5)
+                    if ele:
+                        self.logger.info(f"[YOUTUBE] Search input found by selector: {selector}")
+                        return ele
+                except Exception as e:
+                    last_error = e
+            self._short_wait(0.2, 0.35)
+        self.logger.warning(f"[YOUTUBE] Search input not found within {timeout}s; last_error={last_error}")
+        return None
+
+    def _submit_search(self, page: ChromiumPage, search_input, query: str):
+        search_input.click()
+        self._short_wait(0.2, 0.45)
+        self._clear_search_input(page, search_input)
+
+        for char in query:
+            search_input.input(char)
+            time.sleep(random.uniform(0.02, 0.07))
+        self._short_wait(0.35, 0.75)
+
+        submitted = False
+        try:
+            search_input.input("\n")
+            submitted = True
+        except Exception as e:
+            self.logger.warning(f"[YOUTUBE] Enter submit failed: {e}")
+
+        if not submitted:
+            script = """
+            const button = document.querySelector('button#search-icon-legacy, ytd-searchbox button, yt-searchbox button');
+            if (button) {
+                button.click();
+                return true;
+            }
+            return false;
+            """
+            submitted = bool(page.run_js(script))
+
+        self.logger.info(f"[YOUTUBE] Search submitted: {submitted}")
+        self._short_wait(2.0, 3.0)
+
+    def _clear_search_input(self, page: ChromiumPage, search_input):
+        try:
+            page.run_js(
                 """
-                () => {
-                    const result = [];
-                    const pushText = (el) => {
-                        const text = (el.innerText || el.textContent || '').trim();
-                        if (text) result.push(text);
-                    };
-
-                    const input = document.querySelector(
-                        "input[name='search_query'], input#search, input.ytSearchboxComponentInput"
-                    );
-                    const controls = input && input.getAttribute('aria-controls');
-                    const controlledList = controls && document.getElementById(controls);
-                    if (controlledList) {
-                        controlledList
-                            .querySelectorAll("[role='option'], li, div.ytSuggestionComponentSuggestion")
-                            .forEach(pushText);
-                    }
-
-                    document
-                        .querySelectorAll(
-                            "div.ytSuggestionComponentSuggestion div.ytSuggestionComponentText, " +
-                            "div.ytSuggestionComponentSuggestion, " +
-                            "[role='option'], " +
-                            "li.sbsb_c .sbqs_c, " +
-                            "li.sbsb_c"
-                        )
-                        .forEach(pushText);
-
-                    return result;
+                const el = document.querySelector("input[name='search_query'], input#search, input.ytSearchboxComponentInput");
+                if (el) {
+                    el.focus();
+                    el.value = '';
+                    el.dispatchEvent(new Event('input', {bubbles: true}));
+                    el.dispatchEvent(new Event('change', {bubbles: true}));
+                    return true;
                 }
+                return false;
                 """
             )
-            return self._dedupe_suggestions(texts or [])
-        except PlaywrightError as e:
-            self.logger.warning(f"[YOUTUBE] Error extracting suggestion texts: {e}")
+        except Exception:
+            pass
+        try:
+            search_input.clear()
+        except Exception:
+            pass
+
+    def _wait_for_results_page(self, page: ChromiumPage, query: str):
+        deadline = time.time() + self.page_timeout_seconds
+        last_url = ""
+        while time.time() < deadline:
+            current_url = self._page_url(page)
+            if current_url != last_url:
+                self.logger.info(f"[YOUTUBE] Waiting results page, current_url={current_url}")
+                last_url = current_url
+            if "/results" in current_url and "search_query=" in current_url:
+                return True
+            self._short_wait(0.25, 0.5)
+        return False
+
+    def _click_results_search_box(self, page: ChromiumPage, search_input):
+        try:
+            search_input.click()
+        except Exception as e:
+            self.logger.warning(f"[YOUTUBE] Native search box click failed: {e}")
+
+        script = """
+        const el = document.querySelector("input[name='search_query'], input#search, input.ytSearchboxComponentInput");
+        if (!el) return false;
+        el.scrollIntoView({block: 'center', inline: 'center'});
+        el.focus();
+        for (const type of ['pointerdown', 'mousedown', 'mouseup', 'click']) {
+            el.dispatchEvent(new MouseEvent(type, {bubbles: true, cancelable: true, view: window}));
+        }
+        return true;
+        """
+        try:
+            page.run_js(script)
+        except Exception as e:
+            self.logger.warning(f"[YOUTUBE] JS search box click failed: {e}")
+        self._short_wait(0.5, 0.9)
+        self._log_page_state(page, "results_search_box_clicked")
+
+    def _wait_for_dropdown_suggestions(self, page: ChromiumPage):
+        deadline = time.time() + self.dropdown_timeout_seconds
+        suggestions = []
+        while time.time() < deadline:
+            suggestions = self._extract_dropdown_suggestions(page)
+            if suggestions:
+                self.logger.info(f"[YOUTUBE] Dropdown suggestions found: {suggestions}")
+                return suggestions
+            self._short_wait(0.2, 0.35)
+        self.logger.warning(f"[YOUTUBE] Dropdown suggestions not found within {self.dropdown_timeout_seconds}s")
+        return suggestions
+
+    def _extract_dropdown_suggestions(self, page: ChromiumPage):
+        script = """
+        const result = [];
+        const pushText = (el) => {
+            const rect = el.getBoundingClientRect();
+            const style = window.getComputedStyle(el);
+            if (rect.width <= 0 || rect.height <= 0 || style.visibility === 'hidden' || style.display === 'none') {
+                return;
+            }
+            const text = (el.innerText || el.textContent || '').replace(/\\s+/g, ' ').trim();
+            if (text) result.push(text);
+        };
+
+        const input = document.querySelector("input[name='search_query'], input#search, input.ytSearchboxComponentInput");
+        const controls = input && input.getAttribute('aria-controls');
+        const controlled = controls && document.getElementById(controls);
+        if (controlled) {
+            controlled.querySelectorAll("[role='option'], li, div.ytSuggestionComponentSuggestion").forEach(pushText);
+        }
+
+        document.querySelectorAll(
+            "div.ytSuggestionComponentSuggestion div.ytSuggestionComponentText, " +
+            "div.ytSuggestionComponentSuggestion, " +
+            "[role='option'], " +
+            "li.sbsb_c .sbqs_c, " +
+            "li.sbsb_c"
+        ).forEach(pushText);
+
+        return result;
+        """
+        try:
+            return self._dedupe_suggestions(page.run_js(script) or [])
+        except Exception as e:
+            self.logger.warning(f"[YOUTUBE] Dropdown extraction failed: {e}")
             return []
-
-    def _log_page_state(self, page, label: str, warning: bool = False):
-        state = self._page_state(page)
-        log = self.logger.warning if warning else self.logger.info
-        log(f"[YOUTUBE_DEBUG] {label}: {state}")
-
-    def _page_state(self, page):
-        try:
-            return page.evaluate(
-                """
-                () => {
-                    const inputInfo = Array.from(document.querySelectorAll('input'))
-                        .slice(0, 12)
-                        .map((el) => {
-                            const rect = el.getBoundingClientRect();
-                            return {
-                                name: el.getAttribute('name') || '',
-                                id: el.id || '',
-                                cls: el.className || '',
-                                type: el.type || '',
-                                placeholder: el.getAttribute('placeholder') || '',
-                                aria: el.getAttribute('aria-label') || '',
-                                width: Math.round(rect.width),
-                                height: Math.round(rect.height),
-                                visible: rect.width > 0 && rect.height > 0
-                            };
-                        });
-                    const bodyText = (document.body && document.body.innerText || '')
-                        .replace(/\\s+/g, ' ')
-                        .trim();
-                    return {
-                        href: location.href,
-                        readyState: document.readyState,
-                        title: document.title || '',
-                        inputCount: document.querySelectorAll('input').length,
-                        ytdApp: !!document.querySelector('ytd-app'),
-                        searchboxCount: document.querySelectorAll(
-                            "ytd-searchbox, yt-searchbox, input[name='search_query'], input#search"
-                        ).length,
-                        suggestionsCount: document.querySelectorAll(
-                            "div.ytSuggestionComponentSuggestion, [role='option'], li.sbsb_c"
-                        ).length,
-                        inputs: inputInfo,
-                        bodyPreview: bodyText.slice(0, 300)
-                    };
-                }
-                """
-            )
-        except PlaywrightError as e:
-            return {
-                "href": getattr(page, "url", "unavailable"),
-                "error": type(e).__name__,
-                "bodyPreview": "",
-            }
 
     def _dedupe_suggestions(self, suggestions):
         seen = set()
@@ -670,159 +529,80 @@ class Scraper:
             response["detail"] = (detail or "")[:500]
         return response
 
-    def get_list(self, query: str, limit: int = 30):
-        base_url = f"https://www.youtube.com/results?search_query={quote(query)}&hl=ko&gl=KR"
-        results = []
+    def _page_url(self, page: ChromiumPage):
         try:
-            self.logger.info(f"[YOUTUBE] Starting Playwright scrape for query: {query}, limit: {limit}")
-            with self._new_page() as page:
-                self._goto_results_page(page, base_url)
-                for _ in range(max(1, limit + 1)):
-                    page.mouse.wheel(0, 800)
-                    page.wait_for_timeout(500)
+            return page.url or ""
+        except Exception:
+            return ""
 
-                soup = BeautifulSoup(page.content(), "html.parser")
-                all_items = soup.select("ytd-video-renderer, ytd-reel-item-renderer")
-                self.logger.info(f"[YOUTUBE] Parsed {len(all_items)} items from search page.")
-                results = self._parse_items(all_items, limit)
+    def _log_page_state(self, page: ChromiumPage, label: str):
+        script = """
+        const inputs = Array.from(document.querySelectorAll('input')).slice(0, 12).map((el) => {
+            const rect = el.getBoundingClientRect();
+            return {
+                name: el.getAttribute('name') || '',
+                id: el.id || '',
+                cls: el.className || '',
+                type: el.type || '',
+                value: el.value || '',
+                aria: el.getAttribute('aria-label') || '',
+                controls: el.getAttribute('aria-controls') || '',
+                w: Math.round(rect.width),
+                h: Math.round(rect.height)
+            };
+        });
+        const body = (document.body && document.body.innerText || '').replace(/\\s+/g, ' ').trim();
+        return {
+            readyState: document.readyState,
+            ytdApp: !!document.querySelector('ytd-app'),
+            inputCount: document.querySelectorAll('input').length,
+            searchboxCount: document.querySelectorAll("ytd-searchbox, yt-searchbox, input[name='search_query'], input#search").length,
+            suggestionCount: document.querySelectorAll("div.ytSuggestionComponentSuggestion, [role='option'], li.sbsb_c").length,
+            inputs,
+            bodyPreview: body.slice(0, 240)
+        };
+        """
+        try:
+            state = page.run_js(script)
+            self.logger.info(
+                f"[YOUTUBE_DEBUG] {label}: url={self._page_url(page)}, "
+                f"title={page.title!r}, state={state}"
+            )
         except Exception as e:
-            self.logger.warning(f"[YOUTUBE] Unexpected error in get_list(): {e}")
-        finally:
-            self.logger.info(f"[YOUTUBE] Final result count: {len(results)}")
-        return results
+            self.logger.info(
+                f"[YOUTUBE_DEBUG] {label}: url={self._page_url(page)}, "
+                f"title_unavailable_error={e}"
+            )
 
-    def _parse_items(self, all_items, limit):
-        results = []
-        for item in all_items:
-            if len(results) >= limit:
-                break
-
-            if item.name == "ytd-video-renderer":
-                title_tag = item.select_one("#video-title")
-                if not title_tag:
-                    continue
-
-                title = title_tag.get("title", "").strip()
-                href = title_tag.get("href", "")
-                url = f"https://www.youtube.com{href}" if href.startswith("/") else href
-                channel_tag = item.select_one("ytd-channel-name #text")
-                channel = channel_tag.get_text(strip=True) if channel_tag else ""
-
-                meta_info = item.select_one("#metadata-line")
-                view_count, published_date = "", ""
-                if meta_info:
-                    spans = meta_info.find_all("span")
-                    if len(spans) >= 2:
-                        view_count = self.get_view_count(spans[0].get_text(strip=True))
-                        published_date = self.calculate_before_date(spans[1].get_text(strip=True))
-
-                desc_texts = []
-                for container in item.select("div.metadata-snippet-container-one-line"):
-                    for selector in (
-                        "a.metadata-snippet-timestamp yt-formatted-string.metadata-snippet-text-navigation",
-                        "yt-formatted-string.metadata-snippet-text",
-                    ):
-                        snippet = container.select_one(selector)
-                        if snippet:
-                            desc_texts.append(snippet.get_text(separator=" ", strip=True))
-
-                video_title_tag = item.find("a", id="video-title")
-                aria_label = video_title_tag.get("aria-label", "") if video_title_tag else ""
-                match = re.search(r"(?:조회수\s+)?([\d,]+)(?:회| views)", aria_label)
-                if match:
-                    view_count = match.group(1).replace(",", "")
-
-                results.append({
-                    "VideoID": self.get_video_id_with_split(url),
-                    "title": title,
-                    "channel": channel,
-                    "url": url,
-                    "description": "\n".join(desc_texts).strip(),
-                    "publishedDate": published_date,
-                    "videoCount": view_count,
-                    "videoType": "shorts" if "shorts" in url else "video",
-                })
-
-            elif item.name == "ytd-reel-item-renderer":
-                title_tag = item.select_one("#shorts-title")
-                shorts_link_tag = item.select_one("a#thumbnail")
-                if not title_tag or not shorts_link_tag:
-                    continue
-
-                href = shorts_link_tag.get("href", "")
-                url = f"https://www.youtube.com{href}"
-                channel_tag = item.select_one("ytd-channel-name #text")
-                results.append({
-                    "VideoID": self.get_video_id_with_split(url),
-                    "title": title_tag.get_text(strip=True),
-                    "channel": channel_tag.get_text(strip=True) if channel_tag else "",
-                    "url": url,
-                    "description": "",
-                    "publishedDate": "",
-                    "videoCount": "",
-                    "videoType": "shorts",
-                })
-        return results
-
-    def calculate_before_date(self, input_str: str):
-        pattern = r"(\d+)\s*(년|개월|주|일|시간|분|초|year|month|week|day|hour|minute|second)s?\s*(전|ago)"
-        match = re.search(pattern, input_str.strip(), re.IGNORECASE)
-        if not match:
-            return ""
-
-        number_str, unit_str, _ = match.groups()
-        number = int(number_str)
-        unit_map = {
-            "년": "years", "year": "years",
-            "개월": "months", "month": "months",
-            "주": "weeks", "week": "weeks",
-            "일": "days", "day": "days",
-            "시간": "hours", "hour": "hours",
-            "분": "minutes", "minute": "minutes",
-            "초": "seconds", "second": "seconds",
-        }
-
-        unit_key = unit_str.lower()
-        if unit_key not in unit_map:
-            return ""
-
-        before_date = datetime.now() - relativedelta(**{unit_map[unit_key]: number})
-        return before_date.strftime("%Y-%m-%d")
-
-    def get_view_count(self, view_str: str) -> str:
-        s = view_str.strip().lower()
-        s = re.sub(r"(조회수|views|회|\s+)", "", s)
-
-        korean_match = re.match(r"^(\d+(?:\.\d+)?)(만|천)$", s)
-        if korean_match:
-            number_str, unit_str = korean_match.groups()
-            number = float(number_str)
-            if unit_str == "만":
-                return str(int(number * 10_000))
-            if unit_str == "천":
-                return str(int(number * 1_000))
-
-        multiplier = 1
-        if "k" in s:
-            multiplier = 1_000
-            s = s.replace("k", "")
-        elif "m" in s:
-            multiplier = 1_000_000
-            s = s.replace("m", "")
-
+    def _dump_debug_artifacts(self, page: ChromiumPage, query: str, tag: str):
+        if os.getenv("YOUTUBE_DEBUG_DUMP", "0") != "1":
+            return
+        safe_query = re.sub(r"[^a-zA-Z0-9가-힣]+", "_", query)[:40]
+        base = f"/tmp/dyoutube_suggestion_{tag}_{safe_query}_{int(time.time())}"
+        html_path = f"{base}.html"
+        png_path = f"{base}.png"
         try:
-            value = float(s)
-        except ValueError:
-            return "0"
-        return str(int(value * multiplier))
+            with open(html_path, "w", encoding="utf-8") as f:
+                f.write(page.html or "")
+            self.logger.warning(f"[YOUTUBE_DEBUG] html dumped: {html_path}")
+        except Exception as e:
+            self.logger.warning(f"[YOUTUBE_DEBUG] html dump failed: {e}")
+        try:
+            page.get_screenshot(path=png_path, full_page=True)
+            self.logger.warning(f"[YOUTUBE_DEBUG] screenshot dumped: {png_path}")
+        except Exception as e:
+            self.logger.warning(f"[YOUTUBE_DEBUG] screenshot dump failed: {e}")
 
-    def to_kst(self, timestamp: str):
-        dt = datetime.fromisoformat(timestamp)
-        return dt.astimezone(timezone(timedelta(hours=9))).isoformat()
+    def _short_wait(self, low: float, high: float):
+        time.sleep(random.uniform(low, high))
 
-    def get_video_id_with_split(self, url: str):
-        if "shorts/" in url:
-            return url.split("shorts/", 1)[1].split("?", 1)[0].split("&", 1)[0]
-        if "v=" not in url:
+    def _stringify_output(self, value):
+        if value is None:
             return ""
-        return url.split("v=", 1)[1].split("&", 1)[0]
+        if isinstance(value, bytes):
+            return value.decode("utf-8", "replace")
+        return str(value)
+
+    def get_list(self, query: str, limit: int = 30):
+        self.logger.warning("[YOUTUBE] get_list is not supported by dyoutube_suggestion")
+        return []
