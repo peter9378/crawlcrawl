@@ -4,7 +4,7 @@ FROM rockylinux:9
 ARG TARGETARCH
 ENV DEBIAN_FRONTEND=noninteractive
 
-# GCP/container DNS and IPv6 timeout mitigation.
+# Keep package installation stable on Rocky Linux builders.
 RUN echo "ip_resolve=4" >> /etc/dnf/dnf.conf && \
     echo "timeout=15" >> /etc/dnf/dnf.conf && \
     echo "retries=5" >> /etc/dnf/dnf.conf && \
@@ -42,7 +42,7 @@ RUN echo "ip_resolve=4" >> /etc/dnf/dnf.conf && \
         xdg-utils \
     && dnf clean all
 
-# System Chrome for DrissionPage. Use IPv4 during build to avoid resolver flakiness.
+# System Chrome for DrissionPage.
 RUN if [ "$TARGETARCH" != "amd64" ]; then \
         echo "google-chrome-stable RPM supports amd64 only; build with --platform linux/amd64"; \
         exit 1; \
