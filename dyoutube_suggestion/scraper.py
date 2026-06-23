@@ -188,12 +188,13 @@ class Scraper:
         if not self._wait_for_results_page(page):
             self._dump_debug_artifacts(page, query, "results_page_not_loaded")
             raise RuntimeError(f"YouTube search results page did not load: {self._page_url(page)}")
+        self._wait_for_result_items(page)
         self._log_page_state(page, "results_loaded")
 
-        suggestions = self._extract_dropdown_suggestions(page)
+        suggestions = self._open_and_extract_suggestions(page, query)
         if suggestions:
             self.logger.info(f"[YOUTUBE] Suggestions found in results HTML: {suggestions}")
-            return self._expand_ellipsis_suggestions(suggestions, query)
+            return suggestions
 
         self._dump_debug_artifacts(page, query, "suggestions_not_found")
         self.logger.warning("[YOUTUBE] Suggestion HTML was not found in results page")
@@ -599,12 +600,70 @@ class Scraper:
             self._short_wait(0.25, 0.5)
         return False
 
-    def _extract_dropdown_suggestions(self, page: ChromiumPage):
+    def _wait_for_result_items(self, page: ChromiumPage):
+        deadline = time.time() + 10
+        while time.time() < deadline:
+            try:
+                if page.run_js(
+                    """
+                    return document.querySelectorAll(
+                        'ytd-video-renderer, ytd-reel-item-renderer, ytm-shorts-lockup-view-model'
+                    ).length > 0;
+                    """
+                ):
+                    return True
+            except Exception as e:
+                self.logger.debug(f"[YOUTUBE] Result item wait skipped once: {e}")
+            self._short_wait(0.25, 0.45)
+        return False
+
+    def _open_and_extract_suggestions(self, page: ChromiumPage, query: str):
+        search_input = self._find_search_input(page, self.input_timeout_seconds)
+        if not search_input:
+            self.logger.info("[YOUTUBE] Results search input not found for suggestions")
+            return []
+
+        try:
+            search_input.click()
+        except Exception as e:
+            self.logger.debug(f"[YOUTUBE] Native results search input click failed: {e}")
+
+        try:
+            clicked = page.run_js(
+                """
+                const el = document.querySelector("input[name='search_query'], input#search, input.ytSearchboxComponentInput");
+                if (!el) return false;
+                el.focus();
+                el.click();
+                el.dispatchEvent(new MouseEvent('mousedown', {bubbles: true, cancelable: true}));
+                el.dispatchEvent(new MouseEvent('mouseup', {bubbles: true, cancelable: true}));
+                return true;
+                """
+            )
+            self.logger.info(f"[YOUTUBE] Clicked results search input for suggestions: {clicked}")
+        except Exception as e:
+            self.logger.debug(f"[YOUTUBE] JS results search input click failed: {e}")
+
+        deadline = time.time() + max(self.dropdown_timeout_seconds, 8)
+        suggestions = []
+        while time.time() < deadline:
+            suggestions = self._extract_dropdown_suggestions(page, query)
+            if suggestions:
+                return suggestions
+            self._short_wait(0.25, 0.4)
+        return suggestions
+
+    def _extract_dropdown_suggestions(self, page: ChromiumPage, query: str = ""):
         script = """
+        const query = __QUERY__;
+        const clean = (text) => (text || '').replace(/\\s+/g, ' ').trim();
         const result = [];
+        const seen = new Set();
         const push = (text) => {
-            text = (text || '').replace(/\\s+/g, ' ').trim();
-            if (text) result.push(text);
+            const value = clean(text);
+            if (!value || value === query || seen.has(value)) return;
+            seen.add(value);
+            result.push(value);
         };
         const pushOption = (el) => {
             push(el.getAttribute('aria-label'));
@@ -656,7 +715,7 @@ class Scraper:
         ).forEach(pushOption);
 
         return result;
-        """
+        """.replace("__QUERY__", json.dumps(query, ensure_ascii=False))
         try:
             return self._dedupe_suggestions(page.run_js(script) or [])
         except Exception as e:
