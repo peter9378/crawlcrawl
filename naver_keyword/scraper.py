@@ -554,10 +554,10 @@ class Scraper:
                 except Exception as e:
                     self.logger.warning(f"[TOGETHER] Could not get page info: {e}")
                 
-                # 스크롤을 통해 동적 콘텐츠 로드
-                self.logger.info("[TOGETHER] Start scrolling...")
+                # 함께찾은 키워드가 페이지 하단에 있는 경우까지 동적 콘텐츠 로드
+                self.logger.info("[TOGETHER] Start scrolling deeper...")
                 try:
-                    driver_wrapper.scroll_down(nloop=3)  # 3번 스크롤
+                    driver_wrapper.scroll_down(nloop=6)  # 기존보다 약 2배 더 아래로 스크롤
                     time.sleep(1)  # 페이지 로딩이 완전히 끝날 때까지 대기
                 except Exception as e:
                     self.logger.warning(f"[TOGETHER] Error during scroll: {e}, continuing anyway...")
