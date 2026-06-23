@@ -22,6 +22,7 @@ class YouTubeCrawler:
         "yt-searchbox input",
         "form[role='search'] input",
     )
+    _user_agent_cache = {}
 
     def __init__(self):
         self.logger = logging.getLogger("uvicorn")
@@ -138,7 +139,6 @@ class YouTubeCrawler:
         """
         try:
             page.add_init_js(script)
-            page.run_cdp("Page.addScriptToEvaluateOnNewDocument", source=script)
         except Exception as e:
             self.logger.debug("[YOUTUBE] stealth script install failed: %s", e)
 
@@ -375,6 +375,15 @@ class YouTubeCrawler:
         return None
 
     def _build_user_agent(self, chrome_path: str):
+        cache_key = chrome_path or ""
+        cached = self._user_agent_cache.get(cache_key)
+        if cached:
+            return cached
+        user_agent = self._resolve_user_agent(chrome_path)
+        self._user_agent_cache[cache_key] = user_agent
+        return user_agent
+
+    def _resolve_user_agent(self, chrome_path: str):
         if chrome_path:
             try:
                 completed = subprocess.run(
