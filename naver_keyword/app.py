@@ -3,6 +3,7 @@ from fastapi.responses import JSONResponse
 from scraper import Scraper, ScraperException
 from selenium_pool import get_driver_pool, cleanup_driver_pool
 import re
+import os
 from urllib.parse import unquote
 import time
 import asyncio
@@ -20,8 +21,9 @@ app = FastAPI(
     version="2.1.1"
 )
 
-# ThreadPoolExecutor 설정 (CPU 코어 * 2)
-executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="scraper_worker")
+# ThreadPoolExecutor 설정
+SCRAPER_MAX_WORKERS = int(os.environ.get("SCRAPER_MAX_WORKERS", "2"))
+executor = ThreadPoolExecutor(max_workers=SCRAPER_MAX_WORKERS, thread_name_prefix="scraper_worker")
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - [%(threadName)s] - %(message)s"

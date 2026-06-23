@@ -29,6 +29,9 @@ class SeleniumDriver:
     DOCUMENT_READY_TIMEOUT = float(os.environ.get('SELENIUM_DOCUMENT_READY_TIMEOUT', '10'))
     # URL 전환 후 동적 DOM이 채워질 최소 대기 시간 (초)
     PAGE_STABILIZE_DELAY = float(os.environ.get('SELENIUM_PAGE_STABILIZE_DELAY', '2.0'))
+    # URL 로드 실패 시 드라이버 재시작 후 재시도 횟수
+    NAVIGATION_RETRIES = int(os.environ.get('SELENIUM_NAVIGATION_RETRIES', '2'))
+    NAVIGATION_RETRY_DELAY = float(os.environ.get('SELENIUM_NAVIGATION_RETRY_DELAY', '1.0'))
     # 빈 문서로 간주할 최소 HTML 길이
     MIN_PAGE_SOURCE_LENGTH = 100
     # 암묵적 대기 시간 (초)
@@ -69,7 +72,7 @@ class SeleniumDriver:
         options.add_argument('--disable-geolocation')
         options.add_argument('--disable-gpu-sandbox')
         options.add_argument('--disable-blink-features=AutomationControlled')
-        options.page_load_strategy = 'none'  # driver.get 대기 대신 load_url에서 명시적으로 검증
+        options.page_load_strategy = 'eager'  # DOMContentLoaded 이후 빠르게 반환
         
         prefs = {
             "profile.managed_default_content_settings.images": 2,  # Disable images
@@ -163,6 +166,11 @@ class SeleniumDriver:
         """
         if self.driver:
             try:
+                return self.driver.page_source
+            except WebDriverException as e:
+                self.logger.warning(f"[SELENIUM] Error getting page source: {e}")
+
+            try:
                 root = self.driver.execute_cdp_cmd("DOM.getDocument", {
                     "depth": 0,
                     "pierce": True
@@ -176,12 +184,7 @@ class SeleniumDriver:
                     if outer_html:
                         return outer_html
             except WebDriverException as e:
-                self.logger.warning(f"[SELENIUM] Error getting page source via CDP: {e}")
-
-            try:
-                return self.driver.page_source
-            except WebDriverException as e:
-                self.logger.error(f"[SELENIUM] Error getting page source: {e}")
+                self.logger.error(f"[SELENIUM] Error getting page source via CDP: {e}")
         return None
 
     def _configure_cdp(self):
@@ -206,41 +209,48 @@ class SeleniumDriver:
     def load_url(self, url: str):
         """URL을 로드하고 최소한의 문서 준비 상태를 검증합니다.
 
-        Docker/headless Chrome에서는 renderer timeout 후 빈 탭이 남는 경우가 있어
-        driver.get 예외를 무시하지 않고 실패로 전파합니다.
+        CDP Page.navigate는 Chrome/ChromeDriver가 불안정할 때 장시간 블록될 수 있어,
+        page load timeout이 적용되는 driver.get으로 로드하고 실패 시 드라이버를 재시작합니다.
         """
         if not self.driver:
             error_msg = "[SELENIUM] Driver is not initialized, cannot load URL"
             self.logger.error(error_msg)
             raise WebDriverException(error_msg)
 
-        try:
-            self.logger.info(f"[SELENIUM] Loading target URL: {url}")
-            self._navigate_with_cdp(url)
-            self._wait_for_document_ready(url)
-            time.sleep(self.PAGE_STABILIZE_DELAY)
-            self._stop_loading()
-            self._validate_page_source(url)
-            self.logger.info("[SELENIUM] Target URL loaded successfully")
+        last_error = None
+        for attempt in range(1, self.NAVIGATION_RETRIES + 1):
+            try:
+                self.logger.info(
+                    f"[SELENIUM] Loading target URL: {url} "
+                    f"(attempt {attempt}/{self.NAVIGATION_RETRIES})"
+                )
+                try:
+                    self.driver.get(url)
+                except TimeoutException as e:
+                    self.logger.warning(f"[SELENIUM] driver.get timed out, validating rendered page: {e}")
+                    self._stop_loading()
 
-        except TimeoutException as e:
-            self._stop_loading()
-            error_msg = f"[SELENIUM] Timed out loading target URL: {url}"
-            self.logger.warning(error_msg)
-            raise WebDriverException(error_msg) from e
+                self._wait_for_document_ready(url)
+                time.sleep(self.PAGE_STABILIZE_DELAY)
+                self._stop_loading()
+                self._validate_page_source(url)
+                self.logger.info("[SELENIUM] Target URL loaded successfully")
+                return
 
-        except WebDriverException:
-            self._stop_loading()
-            raise
+            except (TimeoutException, WebDriverException) as e:
+                last_error = e
+                self._stop_loading()
+                self.logger.warning(
+                    f"[SELENIUM] Target URL load attempt {attempt}/{self.NAVIGATION_RETRIES} failed: {e}"
+                )
+                if attempt < self.NAVIGATION_RETRIES:
+                    self.logger.info("[SELENIUM] Restarting driver before next target URL attempt")
+                    self.restart_driver()
+                    time.sleep(self.NAVIGATION_RETRY_DELAY * attempt)
 
-    def _navigate_with_cdp(self, url: str):
-        """일반 driver.get 대기 대신 CDP navigation으로 빠르게 전환합니다."""
-        try:
-            self.driver.execute_cdp_cmd("Page.navigate", {"url": url})
-        except WebDriverException as e:
-            error_msg = f"[SELENIUM] CDP navigation failed for {url}: {e}"
-            self.logger.warning(error_msg)
-            raise WebDriverException(error_msg) from e
+        error_msg = f"[SELENIUM] Failed to load target URL after {self.NAVIGATION_RETRIES} attempts: {url}"
+        self.logger.warning(error_msg)
+        raise WebDriverException(error_msg) from last_error
 
     def _wait_for_document_ready(self, url: str):
         """JS 실행 없이 URL이 실제 검색 페이지로 전환될 때까지 대기"""
@@ -249,6 +259,11 @@ class SeleniumDriver:
 
         while time.monotonic() < deadline:
             last_url = self._safe_current_url()
+            state = self._get_page_state()
+            if self._is_chrome_error_state(state):
+                raise WebDriverException(
+                    f"[SELENIUM] Chrome error page while loading {url}: {state}"
+                )
             if last_url != "about:blank" and last_url.startswith(("http://", "https://")):
                 return
             time.sleep(0.25)
@@ -256,6 +271,38 @@ class SeleniumDriver:
         raise TimeoutException(
             f"Document URL did not change for {url}; current_url={last_url}"
         )
+
+    def _get_page_state(self):
+        try:
+            return self.driver.execute_script(
+                """
+                return {
+                    href: location.href,
+                    readyState: document.readyState,
+                    title: document.title || '',
+                    bodyText: (document.body && document.body.innerText || '').slice(0, 300)
+                };
+                """
+            )
+        except Exception as e:
+            return {"error": str(e), "href": self._safe_current_url()}
+
+    def _is_chrome_error_state(self, state) -> bool:
+        if not isinstance(state, dict):
+            return False
+
+        title = (state.get("title") or "").lower()
+        body_text = (state.get("bodyText") or "").lower()
+        error_text = f"{title} {body_text}"
+        chrome_error_markers = (
+            "this site can't be reached",
+            "err_timed_out",
+            "err_connection",
+            "err_name_not_resolved",
+            "사이트에 연결할 수 없음",
+            "연결할 수 없습니다",
+        )
+        return any(marker in error_text for marker in chrome_error_markers)
 
     def _validate_page_source(self, url: str):
         """빈 문서나 about:blank를 성공 로드로 취급하지 않도록 검증"""
@@ -289,7 +336,10 @@ class SeleniumDriver:
             return
 
         try:
-            self.driver.execute_cdp_cmd("Page.navigate", {"url": "about:blank"})
+            self.driver.get("about:blank")
+            self._stop_loading()
+        except TimeoutException as e:
+            self.logger.warning(f"[SELENIUM] Timeout resetting to about:blank: {e}")
             self._stop_loading()
         except WebDriverException as e:
             self.logger.warning(f"[SELENIUM] Error resetting to about:blank: {e}")
@@ -362,13 +412,7 @@ class SeleniumDriver:
             self.logger.info(f"[SELENIUM] Scrolling {nloop} times, {scroll_increment}px each")
             
             for i in range(nloop):
-                self.driver.execute_cdp_cmd("Input.dispatchMouseEvent", {
-                    "type": "mouseWheel",
-                    "x": 150,
-                    "y": 300,
-                    "deltaX": 0,
-                    "deltaY": scroll_increment
-                })
+                self.driver.execute_script("window.scrollBy(0, arguments[0]);", scroll_increment)
                 time.sleep(delay)
             
             self._stop_loading()
