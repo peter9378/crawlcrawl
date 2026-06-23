@@ -36,7 +36,7 @@ class YouTubeCrawler:
     def search(self, query: str, limit: int = 10):
         query = (query or "").strip()
         if not query:
-            return {"query": query, "result": []}
+            return {"query": query, "result": [], "suggestions": []}
 
         page = None
         xvfb_proc = None
@@ -45,13 +45,14 @@ class YouTubeCrawler:
         try:
             xvfb_proc = self._start_xvfb_if_needed()
             page = self._open_page(profile_dir)
-            results = self._run_search_flow(page, query, limit)
-            return {"query": query, "result": results}
+            results, suggestions = self._run_search_flow(page, query, limit)
+            return {"query": query, "result": results, "suggestions": suggestions}
         except Exception as e:
             self.logger.warning("[YOUTUBE] crawl failed: %s", e)
             return {
                 "query": query,
                 "result": [],
+                "suggestions": [],
                 "error": "crawl_failed",
                 "detail": str(e)[:1000],
             }
@@ -82,9 +83,14 @@ class YouTubeCrawler:
 
         self._wait_for_result_items(page)
         self._log_page_state(page, "results_loaded")
+        suggestions = self._open_and_extract_suggestions(page, query)
         results = self._extract_results(page, limit)
-        self.logger.info("[YOUTUBE] extracted %s results", len(results))
-        return results
+        self.logger.info(
+            "[YOUTUBE] extracted %s results and %s suggestions",
+            len(results),
+            len(suggestions),
+        )
+        return results, suggestions
 
     def _open_page(self, profile_dir: str):
         co = ChromiumOptions()
@@ -271,6 +277,59 @@ class YouTubeCrawler:
                 return True
             time.sleep(0.35)
         return False
+
+    def _open_and_extract_suggestions(self, page: ChromiumPage, query: str):
+        search_input = self._find_search_input(page)
+        if not search_input:
+            self.logger.info("[YOUTUBE] results search input not found for suggestions")
+            return []
+
+        try:
+            search_input.click()
+        except Exception as e:
+            self.logger.debug("[YOUTUBE] native results search input click failed: %s", e)
+
+        clicked = page.run_js(
+            """
+            const el = document.querySelector("input[name='search_query'], input#search, input.ytSearchboxComponentInput");
+            if (!el) return false;
+            el.focus();
+            el.click();
+            el.dispatchEvent(new MouseEvent('mousedown', {bubbles: true, cancelable: true}));
+            el.dispatchEvent(new MouseEvent('mouseup', {bubbles: true, cancelable: true}));
+            return true;
+            """
+        )
+        self.logger.info("[YOUTUBE] clicked results search input for suggestions=%s", clicked)
+
+        deadline = time.time() + 8
+        suggestions = []
+        while time.time() < deadline:
+            suggestions = self._extract_suggestions(page, query)
+            if suggestions:
+                return suggestions
+            time.sleep(0.3)
+        return suggestions
+
+    def _extract_suggestions(self, page: ChromiumPage, query: str):
+        script = """
+        const query = __QUERY__;
+        const clean = (text) => (text || '').replace(/\\s+/g, ' ').trim();
+        const labels = [];
+        const seen = new Set();
+        const nodes = document.querySelectorAll(
+            '.ytSearchboxComponentSuggestionsContainer [role="option"][aria-label], [role="listbox"] [role="option"][aria-label]'
+        );
+
+        for (const node of nodes) {
+            const label = clean(node.getAttribute('aria-label'));
+            if (!label || label === query || seen.has(label)) continue;
+            seen.add(label);
+            labels.push(label);
+        }
+        return labels;
+        """.replace("__QUERY__", json.dumps(query, ensure_ascii=False))
+        return page.run_js(script) or []
 
     def _extract_results(self, page: ChromiumPage, limit: int):
         script = """
